@@ -1,0 +1,762 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Ecurious Reserve partner API",
+    "version": "1.0.0",
+    "summary": "Let drivers in your charging app reserve an Ecurious-guarded bay.",
+    "description": "Other charging apps (eMSPs) reserve the Ecurious bay for their own drivers with OCPI 2.2.1-style commands. A guard keeps the bay free, and the camera checks the driver in by license plate, whichever app they booked with.\n\n**Flow**\n1. `GET /api/state` (public): is the bay free, what does it cost right now (`quote.cents`), which session lengths are offered.\n2. Show the price to the driver. Once they accept, `POST /ocpi/2.2.1/commands/RESERVE_NOW` with their plate, their consent to plate recognition, the session length and that price.\n3. Poll `GET /api/partner/v1/reservations/{reservation_id}` for the status: no callbacks are sent.\n4. The camera reads the plate on arrival: `RESERVED` → `ARRIVED` → `CHARGING` → `COMPLETED`. While it is still `RESERVED`, `CANCEL_RESERVATION` frees the bay.\n\n**Auth:** `Authorization: Token <token>`. OCPI 2.2.1 sends the token Base64-encoded; a plain token works too. Ask the Ecurious team for a token, and keep it on your server.\n\n**Every partner answer** uses the OCPI envelope: `{ data, status_code, status_message, timestamp }`.\n\n**Personal data:** you send the plate only so the camera can match the car. It is erased when the reservation ends. Your app collects the driver's consent, and a data processing agreement with Ecurious is needed before going live.\n\nThe full integration guide is `docs/api.md` in the project repository.",
+    "contact": { "name": "Ecurious Reserve team" }
+  },
+  "servers": [
+    { "url": "/", "description": "This Ecurious Reserve server" },
+    { "url": "http://localhost:3000", "description": "Local development" }
+  ],
+  "tags": [
+    { "name": "Public", "description": "No auth. Bay availability, the current price and public chargers for a map." },
+    {
+      "name": "OCPI commands",
+      "description": "OCPI 2.2.1 Commands module, receiver (CPO) side. The CommandResponse is final: `timeout` is 0 and no CommandResult is sent to `response_url`. Poll the partner status endpoint instead."
+    },
+    { "name": "Partner", "description": "Token-protected Ecurious endpoints for partners, in the OCPI envelope." },
+    { "name": "Deep links", "description": "Web pages, not JSON. Link to them from a \"Reserve with Ecurious\" button or a shared link." },
+    { "name": "Ecurious-internal", "description": "Called by Ecurious systems only. Partners never call these. Listed so integrators see the whole flow." }
+  ],
+  "paths": {
+    "/api/state": {
+      "get": {
+        "tags": ["Public"],
+        "operationId": "getState",
+        "summary": "Bay availability, price and session options",
+        "description": "Public and anonymous: no driver data. Read `quote.cents` just before RESERVE_NOW and send it as `ecurious_fee_cents`. The bay is free when `reservation`, `blockedSince` and `priority` are all null. Ignore fields you don't know: the app uses this endpoint too.",
+        "responses": {
+          "200": {
+            "description": "Current state",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/AppState" },
+                "example": {
+                  "bay": { "name": "Ecurious test bay", "address": "Hackathon venue", "lat": 52.52, "lng": 13.405, "powerKw": 200 },
+                  "session": { "type": "fast", "label": "Fast (DC)", "maxMinutes": 120, "presets": [30, 60, 90, 120] },
+                  "holdMinutes": 15,
+                  "simulator": false,
+                  "hardware": { "state": "free", "mock": true },
+                  "reservation": null,
+                  "blockedSince": null,
+                  "waiting": false,
+                  "priority": null,
+                  "quote": { "type": "fast", "cents": 250, "demand": "Normal", "multiplier": 1, "prepaid": false, "warning": null, "noShowCents": 125 },
+                  "log": []
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/chargers": {
+      "get": {
+        "tags": ["Public"],
+        "operationId": "getChargers",
+        "summary": "Public chargers in a map area (GoingElectric)",
+        "description": "Chargers from GoingElectric in the given bounding box, for showing nearby options. Their data, their terms of use: don't bulk-export it. Info only: only Ecurious bays can be reserved.",
+        "parameters": [
+          { "name": "sw_lat", "in": "query", "required": true, "schema": { "type": "number" }, "example": 52.5 },
+          { "name": "sw_lng", "in": "query", "required": true, "schema": { "type": "number" }, "example": 13.38 },
+          { "name": "ne_lat", "in": "query", "required": true, "schema": { "type": "number" }, "example": 52.54 },
+          { "name": "ne_lng", "in": "query", "required": true, "schema": { "type": "number" }, "example": 13.43 },
+          { "name": "min_power", "in": "query", "required": false, "description": "Minimum power in kW", "schema": { "type": "integer", "minimum": 0, "maximum": 1000 }, "example": 50 }
+        ],
+        "responses": {
+          "200": {
+            "description": "Chargers in the area. Without a GoingElectric key the list is empty and `warning` says why.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["chargers"],
+                  "properties": {
+                    "chargers": { "type": "array", "items": { "$ref": "#/components/schemas/Charger" } },
+                    "warning": { "type": "string" },
+                    "more": { "type": "boolean", "description": "GoingElectric has more results than returned" }
+                  }
+                },
+                "example": {
+                  "chargers": [
+                    {
+                      "id": 12345,
+                      "name": "Supermarkt Mitte",
+                      "lat": 52.521,
+                      "lng": 13.401,
+                      "address": "Musterstraße 1, 10115 Berlin",
+                      "network": "EnBW",
+                      "points": [{ "count": 2, "power": 150, "type": "CCS" }],
+                      "fault": false,
+                      "url": "https://www.goingelectric.de/stromtankstellen/Deutschland/Berlin/Supermarkt-Mitte/12345/"
+                    }
+                  ],
+                  "more": false
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/AppError" },
+          "502": { "$ref": "#/components/responses/AppError" }
+        }
+      }
+    },
+    "/ocpi/2.2.1/commands/RESERVE_NOW": {
+      "post": {
+        "tags": ["OCPI commands"],
+        "operationId": "reserveNow",
+        "summary": "Reserve the bay for one of your drivers",
+        "description": "OCPI ReserveNow plus `ecurious_` extension fields. The guard rises at once and holds the bay until `ecurious_arrive_by` (booking time + the arrival grace, 15 min by default); a later `expiry_date` doesn't extend that. The session then runs `ecurious_session_minutes` from booking.\n\nSending the same `reservation_id` again while the reservation is active returns ACCEPTED and changes nothing, so retries are safe. OCPI's replace isn't supported: cancel and reserve with a new id instead.\n\nWell-formed requests the bay can't take (already reserved, another location, the price changed) get HTTP 200 with `result: REJECTED` and the reason in `message`.",
+        "security": [{ "partnerToken": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/ReserveNow" },
+              "example": {
+                "response_url": "https://emsp.example/ocpi/2.2.1/commands/RESERVE_NOW/R-1001",
+                "token": {
+                  "country_code": "DE",
+                  "party_id": "ACM",
+                  "uid": "drv-4711",
+                  "type": "APP_USER",
+                  "contract_id": "DE-ACM-C00004711-3",
+                  "issuer": "Acme Charge",
+                  "valid": true,
+                  "whitelist": "ALLOWED",
+                  "last_updated": "2026-10-24T08:00:00Z"
+                },
+                "expiry_date": "2026-10-24T11:19:39Z",
+                "reservation_id": "R-1001",
+                "location_id": "ECU-TEST-1",
+                "evse_uid": "ECU-TEST-1-1",
+                "ecurious_license_plate": "M-AB 1234",
+                "ecurious_plate_consent": true,
+                "ecurious_session_minutes": 60,
+                "ecurious_fee_cents": 250
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The command was processed: ACCEPTED, or REJECTED with the reason.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/CommandEnvelope" },
+                "examples": {
+                  "accepted": {
+                    "summary": "Reserved",
+                    "value": {
+                      "data": {
+                        "result": "ACCEPTED",
+                        "timeout": 0,
+                        "message": [{ "language": "en", "text": "Reserved. Arrive by 2026-10-24T11:19:39.635Z: the camera checks the car in by its plate." }],
+                        "ecurious_arrive_by": "2026-10-24T11:19:39.635Z",
+                        "ecurious_fee_cents": 250
+                      },
+                      "status_code": 1000,
+                      "status_message": "Success",
+                      "timestamp": "2026-10-24T11:04:39.636Z"
+                    }
+                  },
+                  "alreadyReserved": {
+                    "summary": "Another booking holds the bay",
+                    "value": {
+                      "data": { "result": "REJECTED", "timeout": 0, "message": [{ "language": "en", "text": "Bay is already reserved" }] },
+                      "status_code": 1000,
+                      "status_message": "Success",
+                      "timestamp": "2026-10-24T11:04:39.729Z"
+                    }
+                  },
+                  "unknownLocation": {
+                    "summary": "location_id isn't this bay",
+                    "value": {
+                      "data": { "result": "REJECTED", "timeout": 0, "message": [{ "language": "en", "text": "Unknown location_id. This server has ECU-TEST-1." }] },
+                      "status_code": 1000,
+                      "status_message": "Success",
+                      "timestamp": "2026-10-24T11:04:39.777Z"
+                    }
+                  },
+                  "priceChanged": {
+                    "summary": "Demand moved the price since the driver saw it",
+                    "value": {
+                      "data": { "result": "REJECTED", "timeout": 0, "message": [{ "language": "en", "text": "The price is now €3.75. Check it and reserve again." }] },
+                      "status_code": 1000,
+                      "status_message": "Success",
+                      "timestamp": "2026-10-24T11:05:12.004Z"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/InvalidCommand" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "413": { "$ref": "#/components/responses/TooLarge" },
+          "429": { "$ref": "#/components/responses/TooManyRequests" },
+          "500": { "$ref": "#/components/responses/ServerError" },
+          "502": { "$ref": "#/components/responses/HardwareDown" }
+        }
+      }
+    },
+    "/ocpi/2.2.1/commands/CANCEL_RESERVATION": {
+      "post": {
+        "tags": ["OCPI commands"],
+        "operationId": "cancelReservation",
+        "summary": "Cancel one of your reservations before the driver arrives",
+        "description": "Works only on your own reservations, and only while they are RESERVED: once the camera has checked the car in, the session ends when the car leaves. Cancelling is free in the first 2 minutes and while another car blocks the bay; after that the cancellation tiers apply. `ecurious_fee_cents` is what the booking costs in the end.",
+        "security": [{ "partnerToken": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/CancelReservation" },
+              "example": { "response_url": "https://emsp.example/ocpi/2.2.1/commands/CANCEL_RESERVATION/R-1001", "reservation_id": "R-1001" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The command was processed: ACCEPTED, or REJECTED with the reason.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/CommandEnvelope" },
+                "examples": {
+                  "accepted": {
+                    "summary": "Cancelled within the free minutes",
+                    "value": {
+                      "data": {
+                        "result": "ACCEPTED",
+                        "timeout": 0,
+                        "message": [{ "language": "en", "text": "Cancelled, the bay is free again. No fee." }],
+                        "ecurious_fee_cents": 0
+                      },
+                      "status_code": 1000,
+                      "status_message": "Success",
+                      "timestamp": "2026-10-24T11:04:40.173Z"
+                    }
+                  },
+                  "notYours": {
+                    "summary": "Unknown id, or another partner's reservation",
+                    "value": {
+                      "data": { "result": "REJECTED", "timeout": 0, "message": [{ "language": "en", "text": "Unknown reservation_id" }] },
+                      "status_code": 1000,
+                      "status_message": "Success",
+                      "timestamp": "2026-10-24T11:04:40.110Z"
+                    }
+                  },
+                  "checkedIn": {
+                    "summary": "The car is already in the bay",
+                    "value": {
+                      "data": { "result": "REJECTED", "timeout": 0, "message": [{ "language": "en", "text": "The driver has already checked in. The session ends when the car leaves." }] },
+                      "status_code": 1000,
+                      "status_message": "Success",
+                      "timestamp": "2026-10-24T11:06:02.311Z"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/InvalidCommand" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "413": { "$ref": "#/components/responses/TooLarge" },
+          "429": { "$ref": "#/components/responses/TooManyRequests" },
+          "500": { "$ref": "#/components/responses/ServerError" }
+        }
+      }
+    },
+    "/api/partner/v1/reservations/{reservation_id}": {
+      "get": {
+        "tags": ["Partner"],
+        "operationId": "getPartnerReservation",
+        "summary": "Status of one of your reservations (poll this)",
+        "description": "The polling alternative to OCPI CommandResult callbacks: we never call partner-supplied URLs. Poll every 10 to 30 seconds while the reservation is active; the limit is 60 requests a minute per partner, commands included. Other partners' reservations answer 404.",
+        "security": [{ "partnerToken": [] }],
+        "parameters": [
+          {
+            "name": "reservation_id",
+            "in": "path",
+            "required": true,
+            "description": "The reservation_id you sent with RESERVE_NOW (case-insensitive, URL-encoded)",
+            "schema": { "$ref": "#/components/schemas/CiString36" },
+            "example": "R-1001"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The reservation",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/PartnerReservationEnvelope" },
+                "examples": {
+                  "reserved": {
+                    "summary": "Held, waiting for the car",
+                    "value": {
+                      "data": {
+                        "reservation_id": "R-1001",
+                        "location_id": "ECU-TEST-1",
+                        "evse_uid": "ECU-TEST-1-1",
+                        "status": "RESERVED",
+                        "arrive_by": "2026-10-24T11:19:39.635Z",
+                        "session_end": "2026-10-24T12:04:39.635Z",
+                        "bay_blocked": false,
+                        "license_plate_hint": "MA•••34",
+                        "checked_in_at": null,
+                        "ended_at": null,
+                        "fees": {
+                          "currency": "EUR",
+                          "reservation_cents": 250,
+                          "prepaid": false,
+                          "total_cents": 250,
+                          "lines": [{ "label": "Reservation · Fast (DC) · normal demand", "cents": 250 }]
+                        }
+                      },
+                      "status_code": 1000,
+                      "status_message": "Success",
+                      "timestamp": "2026-10-24T11:04:39.962Z"
+                    }
+                  },
+                  "cancelled": {
+                    "summary": "Cancelled within the free minutes: plate erased, fee refunded",
+                    "value": {
+                      "data": {
+                        "reservation_id": "R-1001",
+                        "location_id": "ECU-TEST-1",
+                        "evse_uid": "ECU-TEST-1-1",
+                        "status": "CANCELLED",
+                        "arrive_by": "2026-10-24T11:19:39.635Z",
+                        "session_end": "2026-10-24T12:04:39.635Z",
+                        "bay_blocked": false,
+                        "license_plate_hint": null,
+                        "checked_in_at": null,
+                        "ended_at": "2026-10-24T11:04:40.173Z",
+                        "fees": {
+                          "currency": "EUR",
+                          "reservation_cents": 250,
+                          "prepaid": false,
+                          "total_cents": 0,
+                          "lines": [
+                            { "label": "Reservation · Fast (DC) · normal demand", "cents": 250 },
+                            { "label": "Refund: cancelled within 2 min", "cents": -250 }
+                          ]
+                        }
+                      },
+                      "status_code": 1000,
+                      "status_message": "Success",
+                      "timestamp": "2026-10-24T11:04:40.227Z"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": {
+            "description": "Not one of your reservations, or too old to still be kept",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/OcpiEnvelope" },
+                "example": { "status_code": 2000, "status_message": "Unknown reservation_id", "timestamp": "2026-10-24T11:04:40.008Z" }
+              }
+            }
+          },
+          "429": { "$ref": "#/components/responses/TooManyRequests" }
+        }
+      }
+    },
+    "/bay/{location_id}": {
+      "get": {
+        "tags": ["Deep links"],
+        "operationId": "bayPage",
+        "summary": "Public page for one bay (share it, link to it)",
+        "description": "Shows the bay's name, power, live availability and price, with one button: \"Reserve in Ecurious Reserve\", which opens `/explore?bay={location_id}&reserve=1`. Signed-out visitors sign in first and come straight back. OpenGraph and Twitter tags make the link preview well in chats. For a \"Reserve with Ecurious\" button in your app, link here: it is the stable public URL, and a future native app takes it over as a universal / app link.",
+        "parameters": [
+          { "name": "location_id", "in": "path", "required": true, "schema": { "$ref": "#/components/schemas/CiString36" }, "example": "ECU-TEST-1" }
+        ],
+        "responses": {
+          "200": { "description": "The page", "content": { "text/html": { "schema": { "type": "string" } } } },
+          "404": { "description": "No such bay on this server", "content": { "text/html": { "schema": { "type": "string" } } } }
+        }
+      }
+    },
+    "/explore": {
+      "get": {
+        "tags": ["Deep links"],
+        "operationId": "explorePage",
+        "summary": "The app's map, opened on a bay",
+        "description": "`/explore?bay={location_id}` selects the bay on the map; `&reserve=1` also opens the reserve dialog. Needs a signed-in Ecurious Reserve account: signed-out visitors are redirected to sign-in and back (HTTP 307).",
+        "parameters": [
+          { "name": "bay", "in": "query", "required": false, "schema": { "$ref": "#/components/schemas/CiString36" }, "example": "ECU-TEST-1" },
+          { "name": "reserve", "in": "query", "required": false, "schema": { "type": "string", "enum": ["1"] }, "example": "1" }
+        ],
+        "responses": {
+          "200": { "description": "The app page", "content": { "text/html": { "schema": { "type": "string" } } } },
+          "307": { "description": "Signed out: redirect to `/sign-in?redirect_url=...`" }
+        }
+      }
+    },
+    "/api/plate-events": {
+      "post": {
+        "tags": ["Ecurious-internal"],
+        "operationId": "plateEvent",
+        "summary": "Camera plate event (Ecurious server only)",
+        "description": "Ecurious-internal: the Ecurious server forwards every car the bay camera sees. A plate matching the active reservation checks the driver in and lowers the guard, whichever app made the booking. Partners never call this. Fails closed: with no `WEBHOOK_SECRET` configured, every event is rejected.",
+        "security": [{ "webhookSecret": [] }],
+        "x-internal": true,
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/PlateEvent" },
+              "example": { "plate": "MAB 1234", "direction": "in" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Processed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["matched"],
+                  "properties": { "matched": { "type": "boolean" }, "matchedBy": { "type": "string", "enum": ["exact", "fuzzy"] } }
+                },
+                "example": { "matched": true, "matchedBy": "exact" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/AppError" },
+          "401": { "$ref": "#/components/responses/AppError" },
+          "502": { "$ref": "#/components/responses/AppError" }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "partnerToken": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "Authorization",
+        "description": "`Token <token>`. OCPI 2.2.1 Base64-encodes the token; a plain token is accepted too. One token per partner app, issued by the Ecurious team. Compared in constant time; a missing or unknown token is 401."
+      },
+      "webhookSecret": { "type": "apiKey", "in": "header", "name": "x-webhook-secret", "description": "Shared secret between the Ecurious server and this app" }
+    },
+    "schemas": {
+      "CiString36": { "type": "string", "pattern": "^[\\x21-\\x7E]{1,36}$", "description": "OCPI CiString(36): printable ASCII without spaces, compared case-insensitively" },
+      "DisplayText": {
+        "type": "object",
+        "required": ["language", "text"],
+        "properties": { "language": { "type": "string", "example": "en" }, "text": { "type": "string", "maxLength": 512 } }
+      },
+      "OcpiEnvelope": {
+        "type": "object",
+        "required": ["status_code", "timestamp"],
+        "properties": {
+          "status_code": {
+            "type": "integer",
+            "description": "1000 success (a REJECTED command is still 1000); 2000 client error (token, unknown id, rate limit); 2001 invalid or missing parameters; 3000 server error",
+            "enum": [1000, 2000, 2001, 3000]
+          },
+          "status_message": { "type": "string" },
+          "timestamp": { "type": "string", "format": "date-time" }
+        }
+      },
+      "CommandResponse": {
+        "type": "object",
+        "required": ["result", "timeout"],
+        "properties": {
+          "result": { "type": "string", "enum": ["ACCEPTED", "REJECTED", "NOT_SUPPORTED"] },
+          "timeout": { "type": "integer", "const": 0, "description": "Always 0: this answer is final and no CommandResult follows" },
+          "message": { "type": "array", "items": { "$ref": "#/components/schemas/DisplayText" }, "description": "Why, in English" },
+          "ecurious_arrive_by": { "type": "string", "format": "date-time", "description": "RESERVE_NOW, ACCEPTED: the car must reach the bay by then, or it counts as a no-show" },
+          "ecurious_fee_cents": { "type": ["integer", "null"], "description": "RESERVE_NOW: the reservation fee. CANCEL_RESERVATION: what the booking costs after cancelling (0 = free)" }
+        }
+      },
+      "CommandEnvelope": {
+        "allOf": [
+          { "$ref": "#/components/schemas/OcpiEnvelope" },
+          { "type": "object", "required": ["data"], "properties": { "data": { "$ref": "#/components/schemas/CommandResponse" } } }
+        ]
+      },
+      "OcpiToken": {
+        "type": "object",
+        "description": "OCPI 2.2.1 Token. We use `uid` to tell your drivers apart (no-show history, one booking at a time) and check `type`, `contract_id` and `valid`. Other fields are accepted and ignored; nothing but `uid` is stored.",
+        "required": ["uid", "type", "contract_id"],
+        "properties": {
+          "country_code": { "type": "string", "maxLength": 2 },
+          "party_id": { "type": "string", "maxLength": 3 },
+          "uid": { "$ref": "#/components/schemas/CiString36", "description": "Stable id of the driver's token in your system. Use one per driver: no-show history is kept per uid." },
+          "type": { "type": "string", "enum": ["AD_HOC_USER", "APP_USER", "OTHER", "RFID"] },
+          "contract_id": { "$ref": "#/components/schemas/CiString36" },
+          "visual_number": { "type": "string", "maxLength": 64 },
+          "issuer": { "type": "string", "maxLength": 64 },
+          "group_id": { "type": "string", "maxLength": 36 },
+          "valid": { "type": "boolean", "description": "false is REJECTED" },
+          "whitelist": { "type": "string", "enum": ["ALWAYS", "ALLOWED", "ALLOWED_OFFLINE", "NEVER"] },
+          "language": { "type": "string", "maxLength": 2 },
+          "last_updated": { "type": "string", "format": "date-time" }
+        }
+      },
+      "ReserveNow": {
+        "type": "object",
+        "description": "OCPI 2.2.1 ReserveNow with Ecurious extension fields (prefix `ecurious_`).",
+        "required": [
+          "token",
+          "expiry_date",
+          "reservation_id",
+          "location_id",
+          "ecurious_license_plate",
+          "ecurious_plate_consent",
+          "ecurious_session_minutes",
+          "ecurious_fee_cents"
+        ],
+        "properties": {
+          "response_url": { "type": "string", "maxLength": 255, "description": "Accepted for OCPI compatibility and never called: we don't make requests to partner-supplied URLs" },
+          "token": { "$ref": "#/components/schemas/OcpiToken" },
+          "expiry_date": { "type": "string", "format": "date-time", "description": "Must be in the future. The hold ends at `ecurious_arrive_by` in the answer (booking + arrival grace), whatever this says." },
+          "reservation_id": { "$ref": "#/components/schemas/CiString36", "description": "Your id for this reservation, unique per reservation. Reusing it while active is a safe retry; after the reservation ended it is REJECTED." },
+          "location_id": { "$ref": "#/components/schemas/CiString36", "description": "The bay's location id, e.g. ECU-TEST-1. Another id is REJECTED." },
+          "evse_uid": { "$ref": "#/components/schemas/CiString36", "description": "Optional. If sent, the bay's EVSE, e.g. ECU-TEST-1-1." },
+          "authorization_reference": { "$ref": "#/components/schemas/CiString36", "description": "Optional, accepted and ignored" },
+          "ecurious_license_plate": { "type": "string", "maxLength": 20, "description": "The plate the camera will read. Spaces and dashes don't matter: 2 to 10 letters and digits." },
+          "ecurious_plate_consent": { "type": "boolean", "const": true, "description": "You confirm that the driver agreed to plate recognition for this booking" },
+          "ecurious_session_minutes": { "type": "integer", "minimum": 1, "description": "How long the driver wants to charge, from booking. At most `session.maxMinutes` from /api/state (120 on a fast DC bay)." },
+          "ecurious_fee_cents": { "type": "integer", "minimum": 0, "description": "The fee the driver accepted: `quote.cents` from /api/state. If demand has moved the price since, the command is REJECTED with the new price." }
+        }
+      },
+      "CancelReservation": {
+        "type": "object",
+        "description": "OCPI 2.2.1 CancelReservation",
+        "required": ["reservation_id"],
+        "properties": {
+          "response_url": { "type": "string", "maxLength": 255, "description": "Accepted for OCPI compatibility and never called" },
+          "reservation_id": { "$ref": "#/components/schemas/CiString36" }
+        }
+      },
+      "PartnerReservation": {
+        "type": "object",
+        "required": ["reservation_id", "location_id", "evse_uid", "status", "arrive_by", "session_end", "bay_blocked", "fees"],
+        "properties": {
+          "reservation_id": { "type": "string" },
+          "location_id": { "type": "string" },
+          "evse_uid": { "type": "string" },
+          "status": {
+            "type": "string",
+            "enum": ["RESERVED", "ARRIVED", "CHARGING", "COMPLETED", "CANCELLED", "NO_SHOW"],
+            "description": "RESERVED: the guard holds the bay. ARRIVED: the camera checked the car in and lowered the guard. CHARGING. COMPLETED: the car left. CANCELLED. NO_SHOW: nobody arrived by arrive_by, the bay was released."
+          },
+          "arrive_by": { "type": "string", "format": "date-time", "description": "Moves later while another car blocks the bay (the hold pauses) and with the one-off extension" },
+          "session_end": { "type": "string", "format": "date-time", "description": "After this plus 15 min, idle fees apply" },
+          "bay_blocked": { "type": "boolean", "description": "Another car is standing in the bay: the hold is paused, the operator alerted, and cancelling is free" },
+          "license_plate_hint": { "type": ["string", "null"], "description": "Masked plate (MA•••34); null once the reservation has ended and the plate is erased" },
+          "checked_in_at": { "type": ["string", "null"], "format": "date-time" },
+          "ended_at": { "type": ["string", "null"], "format": "date-time" },
+          "fees": {
+            "type": "object",
+            "required": ["currency", "total_cents", "lines"],
+            "properties": {
+              "currency": { "type": "string", "const": "EUR" },
+              "reservation_cents": { "type": ["integer", "null"] },
+              "prepaid": { "type": "boolean", "description": "true after repeated no-shows by this token uid: the fee isn't refunded on a no-show" },
+              "total_cents": { "type": "integer", "description": "What this booking costs so far, refunds included. Invoiced to the partner." },
+              "lines": {
+                "type": "array",
+                "items": { "type": "object", "required": ["label", "cents"], "properties": { "label": { "type": "string" }, "cents": { "type": "integer" } } }
+              }
+            }
+          }
+        }
+      },
+      "PartnerReservationEnvelope": {
+        "allOf": [
+          { "$ref": "#/components/schemas/OcpiEnvelope" },
+          { "type": "object", "required": ["data"], "properties": { "data": { "$ref": "#/components/schemas/PartnerReservation" } } }
+        ]
+      },
+      "AppState": {
+        "type": "object",
+        "description": "The public bay state. Only fields useful to partners are listed; ignore the others.",
+        "required": ["bay", "session", "holdMinutes", "reservation", "blockedSince", "priority", "quote"],
+        "properties": {
+          "bay": {
+            "type": "object",
+            "required": ["name", "address", "lat", "lng", "powerKw"],
+            "properties": {
+              "name": { "type": "string" },
+              "address": { "type": "string" },
+              "lat": { "type": "number" },
+              "lng": { "type": "number" },
+              "powerKw": { "type": "number" }
+            }
+          },
+          "session": {
+            "type": "object",
+            "properties": {
+              "type": { "type": "string", "enum": ["fast", "slow"] },
+              "label": { "type": "string" },
+              "maxMinutes": { "type": "integer" },
+              "presets": { "type": "array", "items": { "type": "integer" }, "description": "Session lengths the app offers, in minutes" }
+            }
+          },
+          "holdMinutes": { "type": "number", "description": "How long the bay is held for the driver to arrive" },
+          "reservation": {
+            "oneOf": [{ "type": "null" }, { "$ref": "#/components/schemas/PublicReservation" }],
+            "description": "The active booking, anonymous to everyone but its owner"
+          },
+          "blockedSince": { "type": ["number", "null"], "description": "ms timestamp: a car without a booking is in the bay" },
+          "priority": {
+            "oneOf": [
+              { "type": "null" },
+              { "type": "object", "properties": { "until": { "type": "number" }, "mine": { "type": "boolean" } } }
+            ],
+            "description": "The bay is held briefly for the next driver on the waitlist"
+          },
+          "quote": { "$ref": "#/components/schemas/Quote" }
+        }
+      },
+      "PublicReservation": {
+        "type": "object",
+        "required": ["id", "status", "expiresAt", "end", "mine"],
+        "properties": {
+          "id": { "type": "string" },
+          "status": { "type": "string", "enum": ["reserved", "arrived", "charging", "completed", "cancelled", "no_show"] },
+          "expiresAt": { "type": "number", "description": "ms timestamp: arrival deadline" },
+          "end": { "type": "number", "description": "ms timestamp: session end" },
+          "mine": { "type": "boolean" }
+        }
+      },
+      "Quote": {
+        "type": "object",
+        "required": ["cents", "demand"],
+        "properties": {
+          "type": { "type": "string", "enum": ["fast", "slow"] },
+          "cents": { "type": "integer", "description": "Reservation fee right now. Send it as ecurious_fee_cents." },
+          "demand": { "type": "string", "enum": ["Quiet", "Normal", "Busy", "Peak"] },
+          "multiplier": { "type": "number" },
+          "noShowCents": { "type": "integer", "description": "What a no-show costs: half the fee" }
+        }
+      },
+      "Charger": {
+        "type": "object",
+        "required": ["id", "name", "lat", "lng", "address", "points", "fault"],
+        "properties": {
+          "id": { "type": "integer", "description": "GoingElectric id" },
+          "name": { "type": "string" },
+          "lat": { "type": "number" },
+          "lng": { "type": "number" },
+          "address": { "type": "string" },
+          "network": { "type": "string" },
+          "points": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": { "count": { "type": "integer" }, "power": { "type": "number" }, "type": { "type": "string" } }
+            }
+          },
+          "fault": { "type": "boolean", "description": "GoingElectric has a fault report" },
+          "url": { "type": "string", "format": "uri" }
+        }
+      },
+      "PlateEvent": {
+        "type": "object",
+        "properties": {
+          "plate": { "type": "string", "description": "What the camera read. Empty: it saw a car but couldn't read the plate." },
+          "direction": { "type": "string", "enum": ["in", "out"], "default": "in" }
+        }
+      },
+      "AppError": { "type": "object", "required": ["error"], "properties": { "error": { "type": "string" } } }
+    },
+    "headers": {
+      "Retry-After": { "description": "Seconds until the next request is allowed", "schema": { "type": "integer", "minimum": 1 } }
+    },
+    "responses": {
+      "Unauthorized": {
+        "description": "Missing or unknown token. No partners configured on the server also means 401.",
+        "headers": { "WWW-Authenticate": { "schema": { "type": "string", "const": "Token" } } },
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/OcpiEnvelope" },
+            "example": { "status_code": 2000, "status_message": "Missing or unknown token", "timestamp": "2026-10-24T11:04:39.820Z" }
+          }
+        }
+      },
+      "InvalidCommand": {
+        "description": "Malformed request: a field is missing or invalid. Fix the request; retrying it as is won't help.",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/CommandEnvelope" },
+            "example": {
+              "data": { "result": "REJECTED", "timeout": 0, "message": [{ "language": "en", "text": "ecurious_license_plate is required: the plate the camera will read" }] },
+              "status_code": 2001,
+              "status_message": "Invalid or missing parameters",
+              "timestamp": "2026-10-24T11:04:39.908Z"
+            }
+          }
+        }
+      },
+      "TooLarge": {
+        "description": "Body over 10 KB",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/CommandEnvelope" },
+            "example": {
+              "data": { "result": "REJECTED", "timeout": 0, "message": [{ "language": "en", "text": "Request body too large" }] },
+              "status_code": 2001,
+              "status_message": "Invalid or missing parameters",
+              "timestamp": "2026-10-24T11:06:00.000Z"
+            }
+          }
+        }
+      },
+      "TooManyRequests": {
+        "description": "More than 60 requests in a minute from this partner",
+        "headers": { "Retry-After": { "$ref": "#/components/headers/Retry-After" } },
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/OcpiEnvelope" },
+            "example": { "status_code": 2000, "status_message": "Too many requests. Try again in 42 s.", "timestamp": "2026-10-24T11:06:18.000Z" }
+          }
+        }
+      },
+      "HardwareDown": {
+        "description": "The bay's hardware did not answer. Nothing was booked; try again in a minute.",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/CommandEnvelope" },
+            "example": {
+              "data": { "result": "REJECTED", "timeout": 0, "message": [{ "language": "en", "text": "The bay’s hardware did not respond. Try again in a minute." }] },
+              "status_code": 3000,
+              "status_message": "Hardware not reachable",
+              "timestamp": "2026-10-24T11:07:00.000Z"
+            }
+          }
+        }
+      },
+      "ServerError": {
+        "description": "Unexpected error on our side",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/CommandEnvelope" },
+            "example": {
+              "data": { "result": "REJECTED", "timeout": 0, "message": [{ "language": "en", "text": "Internal error" }] },
+              "status_code": 3000,
+              "status_message": "Internal error",
+              "timestamp": "2026-10-24T11:07:00.000Z"
+            }
+          }
+        }
+      },
+      "AppError": {
+        "description": "Error from the app API: `{ error }` with the matching HTTP status",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AppError" }, "example": { "error": "Missing or invalid sw_lat" } } }
+      }
+    }
+  }
+}

@@ -1,0 +1,141 @@
+/* Clerk's styles sit in their own layer so Tailwind utilities can still override them */
+@layer theme, base, clerk, components, utilities;
+@import "tailwindcss";
+
+/* Ecurious Reserve tokens, from the Ecurious brand (ecurious.com, captured 2026-10-24): paper and ink neutrals,
+   voltage lime as a fill, ultraviolet as the accent for text and lines on light. Contrast of every pair: DESIGN.md §2. */
+@theme {
+  --font-sans: var(--font-space-grotesk), ui-sans-serif, system-ui, sans-serif;
+  --font-display: var(--font-bebas-neue), "Arial Narrow", ui-sans-serif, sans-serif;
+  --font-mono: var(--font-jetbrains-mono), ui-monospace, "SF Mono", Menlo, monospace;
+
+  --color-page: oklch(0.9671 0.0041 91.4); /* #F5F4F1 paper */
+  --color-surface: oklch(1 0 0); /* #FFFFFF */
+  --color-sunken: oklch(0.9367 0.0096 93.6); /* #ECEAE3 paper-2 */
+  --color-line: oklch(0.8847 0.0027 106.5); /* #D9D9D7 ink at 12% on paper; decorative only */
+  --color-line-strong: oklch(0.6195 0.0019 247.9); /* #858687 input edges: 3:1 on surface, page and sunken */
+  --color-ink: oklch(0.1884 0.0128 248.5); /* #0F1419 */
+  --color-muted: oklch(0.4622 0.0096 253.9); /* #55595E 4.5:1 on every light surface, tints included */
+  --color-faint: oklch(0.5404 0.0072 255.5); /* #6C6F73 placeholders, inactive tabs: 4.5:1 on surface and page */
+
+  /* brand is ink: primary actions are ink pills and the dark bands are ink */
+  --color-brand: oklch(0.1884 0.0128 248.5); /* #0F1419 */
+  --color-brand-strong: oklch(0.276 0.0233 248.7); /* #1F2933 ink-soft: hover, raised dark card, text on lime tints */
+  --color-brand-deep: oklch(0.1884 0.0128 248.5); /* #0F1419 dark bands and the live-booking card */
+  --color-brand-tint: oklch(0.9356 0.0953 115.2); /* #E7F2A8 voltage-soft: held-for-you chips, selected rows */
+  --color-brand-soft: oklch(0.908 0.1203 116.2); /* #DCEB8C hover of brand-tint */
+  --color-on-brand: oklch(0.9671 0.0041 91.4); /* #F5F4F1 */
+  --color-on-brand-muted: oklch(0.7017 0.0012 197.1); /* #9E9F9F paper at 62% on ink */
+  --color-mint: oklch(0.8791 0.1833 120.1); /* #C8E847 lime marks on dark: checks, live dots */
+
+  /* voltage lime: a fill with ink on it, or a mark on ink. Never text, rings or state on a light surface. */
+  --color-signal: oklch(0.8791 0.1833 120.1); /* #C8E847 */
+  --color-signal-strong: oklch(0.9068 0.1752 119); /* #D4F05A hover: Ecurious brightens on hover */
+
+  /* ultraviolet: the accent wherever it has to be text or a line on light */
+  --color-accent: oklch(0.4875 0.2721 282.7); /* #5A1DF0 */
+  --color-accent-tint: oklch(0.9278 0.0398 298.2); /* #EAE2FF */
+  --color-on-brand-accent: oklch(0.7527 0.1426 295.2); /* #B69BFF highlight words on dark */
+
+  --color-warn: oklch(0.5131 0.1452 42.6); /* #A8430F Ecurious signal orange, darkened to read as text */
+  --color-warn-tint: oklch(0.9512 0.0254 56.1); /* #FDEBDF */
+  --color-danger: oklch(0.5013 0.1783 28.7); /* #B3261E */
+  --color-danger-tint: oklch(0.9464 0.0221 24.4); /* #FCE8E6 */
+  --color-dc: oklch(0.276 0.0233 248.7); /* #1F2933 unused: delete once nothing references it */
+
+  /* map and chart roles */
+  --color-context: oklch(0.6247 0.0076 247.9); /* #84888C public chargers: 3:1 on surface and on the map's land */
+  --color-location: oklch(0.546 0.215 262.9); /* your location */
+  /* the EU licence plate band: real-world colours, not brand */
+  --color-plate-blue: oklch(0.442 0.142 259.8);
+  --color-plate-star: oklch(0.865 0.177 90.4);
+
+  --ease-out-quart: cubic-bezier(0.25, 1, 0.5, 1);
+  --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
+
+  --animate-rise: rise 700ms var(--ease-out-expo) both;
+  --animate-pulse-ring: pulse-ring 2.4s var(--ease-out-quart) infinite;
+  --animate-float: float 6.5s ease-in-out infinite; /* landing mockups only */
+
+  @keyframes rise {
+    from {
+      opacity: 0;
+      transform: translateY(18px);
+    }
+  }
+  @keyframes pulse-ring {
+    0% {
+      transform: scale(0.6);
+      opacity: 0.55;
+    }
+    80%,
+    100% {
+      transform: scale(1.9);
+      opacity: 0;
+    }
+  }
+  /* animates `translate`, so it composes with Tailwind's `rotate-*` on the same element */
+  @keyframes float {
+    50% {
+      translate: 0 -10px;
+    }
+  }
+}
+
+/* One stacking scale for the whole app */
+:root {
+  --z-map-ui: 10;
+  --z-sheet: 20;
+  --z-nav: 30;
+  --z-dialog: 40;
+  --z-toast: 50;
+}
+
+@layer base {
+  html {
+    -webkit-text-size-adjust: 100%;
+    scroll-behavior: smooth;
+    font-synthesis-weight: none; /* Bebas Neue ships one weight: never fake a bold */
+  }
+  body {
+    @apply bg-page font-sans text-ink antialiased;
+    font-size: 1rem;
+    line-height: 1.5;
+  }
+  h1,
+  h2,
+  h3 {
+    text-wrap: balance;
+  }
+  p {
+    text-wrap: pretty;
+  }
+  /* Bebas is drawn in capitals; keep the source in sentence case and let CSS set the case */
+  .font-display {
+    text-transform: uppercase;
+  }
+  ::selection {
+    background: var(--color-signal);
+    color: var(--color-ink);
+  }
+  :focus-visible {
+    outline: 3px solid var(--color-accent);
+    outline-offset: 2px;
+    border-radius: 6px;
+  }
+  /* violet is only 2.5:1 on ink, so focus inside dark bands turns lime (13.3:1) */
+  :where(.bg-brand-deep, .bg-brand-strong, .bg-ink) :focus-visible {
+    outline-color: var(--color-signal);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 1ms !important;
+    scroll-behavior: auto !important;
+  }
+}
