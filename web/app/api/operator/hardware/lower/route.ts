@@ -1,18 +1,21 @@
 import * as ecurious from '@/lib/ecurious';
-import { fail } from '@/lib/reservation';
-import { handle, hardwareStatus, requireOperator, reservations } from '@/lib/server';
+import { fail } from '@/lib/errors';
+import { body, handle, hardwareStatus, requireOperator, resolveBay, schedule } from '@/lib/server';
 
-// Recovery: lower the arm by hand, e.g. after a reserve command timed out and the arm may be up with no
-// booking. A booking in progress isn't changed. The adapter's error comes back as a 502.
-export const POST = () =>
+// Recovery: { bayId } lowers that bay's arm by hand, e.g. to let a stuck driver in, or after a command timed out.
+// A booking in progress isn't changed. The adapter's error comes back as a 502.
+export const POST = (req: Request) =>
   handle(async () => {
     await requireOperator();
+    const input = await body(req);
+    const bay = await resolveBay(typeof input.bayId === 'string' ? input.bayId : 'bw-1');
+    const lockId = bay.lockId ?? fail(409, `${bay.name} has no lock to lower`);
     try {
-      await ecurious.release();
+      await ecurious.lower(lockId);
     } catch (e) {
-      reservations.note('hardware', `an operator could not lower the arm: ${(e as Error).message}`);
+      schedule.note('hardware', `an operator could not lower the arm: ${(e as Error).message}`, bay.id);
       fail(502, (e as Error).message);
     }
-    reservations.note('hardware', 'an operator lowered the arm');
-    return { hardware: await hardwareStatus() };
+    schedule.note('hardware', 'an operator lowered the arm', bay.id);
+    return { hardware: await hardwareStatus(bay.id) };
   });

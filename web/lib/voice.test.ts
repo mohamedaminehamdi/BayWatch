@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { bearerOk, createVoice, type BookingService, type VoiceBay } from './voice.ts';
+import { bearerOk, createVoice, signVoiceToken, verifyVoiceToken, type BookingService, type VoiceBay, type VoiceConfig } from './voice.ts';
 
 const MIN = 60_000;
 const BAYS: VoiceBay[] = [
@@ -9,11 +9,13 @@ const BAYS: VoiceBay[] = [
 ];
 // Saturday 24 Oct 2026, 14:00 in Berlin (summer time ends the next night, so tomorrow is UTC+1)
 const T0 = Date.UTC(2026, 9, 24, 12, 0);
+const SECRET = 'test-secret';
 
 function setup({ cents = 250 } = {}) {
   let clock = T0;
   const taken: { bayId: string; start: number; end: number }[] = [];
-  const booked: { id: string; account: string; bayId: string; start: number; blocks: number; priceCents: number }[] = [];
+  const booked: { id: string; account: string; bayId: string; start: number; blocks: number; priceCents: number; vehicleId: string }[] = [];
+  const cars: Record<string, string> = { user_demo: 'car-1' }; // each driver's first car
   const price = { cents };
   const clash = (bayId: string, start: number, end: number) =>
     [...taken, ...booked.map((b) => ({ ...b, end: b.start + b.blocks * 15 * MIN }))].some((x) => x.bayId === bayId && start < x.end && x.start < end);
@@ -27,19 +29,28 @@ function setup({ cents = 250 } = {}) {
       booked.push(b);
       return { id: b.id };
     },
+    vehicle: async (account) => (cars[account] ? { id: cars[account] } : null),
   };
+  const cfg: VoiceConfig = { enabled: true, secret: SECRET };
   const voice = createVoice({ service, now: () => clock });
-  // one Vapi tool call, answered through the envelope, parsed back
-  const tool = async (name: string, args: unknown, { callId = 'call-1', account = 'user_demo', at = clock } = {}) => {
+  // One Vapi tool call, answered through the envelope, parsed back. By default it comes from the app's mic,
+  // with a fresh token for `account` in the call's metadata; `token: null` is a phone call.
+  const tool = async (
+    name: string,
+    args: unknown,
+    { callId = 'call-1', account = 'user_demo', at = clock, token }: { callId?: string; account?: string; at?: number; token?: string | null } = {},
+  ) => {
+    const voiceToken = token === undefined ? signVoiceToken(account, SECRET, clock)!.token : token;
+    const call = { id: callId, ...(voiceToken === null ? {} : { assistantOverrides: { metadata: { voiceToken } } }) };
     const res = await voice.handle(
-      { message: { type: 'tool-calls', timestamp: at, call: { id: callId }, toolCallList: [{ id: 'tc-1', type: 'function', function: { name, arguments: args } }] } },
-      account,
+      { message: { type: 'tool-calls', timestamp: at, call, toolCallList: [{ id: 'tc-1', type: 'function', function: { name, arguments: args } }] } },
+      cfg,
     );
     const [r] = (res as { results: { toolCallId: string; result?: string; error?: string }[] }).results;
     assert.equal(r.toolCallId, 'tc-1');
     return r.result ? JSON.parse(r.result) : r;
   };
-  return { tool, voice, taken, booked, price, tick: (ms: number) => (clock += ms) };
+  return { tool, voice, cfg, cars, taken, booked, price, tick: (ms: number) => (clock += ms) };
 }
 
 const tomorrow = { place: 'Baywatch', date: 'tomorrow', time: '15:00', durationMinutes: 45 };
@@ -71,7 +82,7 @@ test('confirming twice, even in parallel, books exactly once', async () => {
   tick(10 * MIN); // a repeat after the quote's expiry still answers with the same booking
   assert.equal((await tool('confirm_reservation', { quoteId })).bookingId, a.bookingId);
   assert.equal(booked.length, 1);
-  assert.deepEqual([booked[0].account, booked[0].bayId, booked[0].blocks, booked[0].priceCents], ['user_demo', 'bw-1', 3, 250]);
+  assert.deepEqual([booked[0].account, booked[0].bayId, booked[0].blocks, booked[0].priceCents, booked[0].vehicleId], ['user_demo', 'bw-1', 3, 250, 'car-1']);
 });
 
 test('expired, foreign, unknown or overtaken quotes cannot be confirmed', async () => {
@@ -162,7 +173,8 @@ test('relative dates count from the call, in Berlin', async () => {
 
 test('the envelope: one result per toolCallId, errors for unknown tools, nothing for other messages', async () => {
   const { voice } = setup();
-  assert.deepEqual(await voice.handle({ message: { type: 'status-update' } }, 'user_demo'), {});
+  const phone: VoiceConfig = { enabled: true, secret: SECRET, demoUserId: 'user_demo' };
+  assert.deepEqual(await voice.handle({ message: { type: 'status-update' } }, phone), {});
   const res = (await voice.handle(
     {
       message: {
@@ -174,12 +186,12 @@ test('the envelope: one result per toolCallId, errors for unknown tools, nothing
         ],
       },
     },
-    'user_demo',
+    phone,
   )) as { results: { toolCallId: string; result?: string; error?: string }[] };
   assert.deepEqual(res.results.map((r) => r.toolCallId), ['a', 'b']);
   assert.equal(typeof res.results[0].result, 'string');
   assert.match(res.results[1].error!, /Unknown tool/);
-  const noCall = (await voice.handle({ message: { type: 'tool-calls', toolCallList: [{ id: 'c', function: { name: 'quote_reservation' } }] } }, 'u')) as {
+  const noCall = (await voice.handle({ message: { type: 'tool-calls', toolCallList: [{ id: 'c', function: { name: 'quote_reservation' } }] } }, phone)) as {
     results: { error?: string }[];
   };
   assert.match(noCall.results[0].error!, /call id/);
@@ -192,4 +204,54 @@ test('bearerOk fails closed and wants the exact bearer token', () => {
   assert.equal(bearerOk('s3cret', 's3cret'), false);
   assert.equal(bearerOk('Bearer wrong!', 's3cret'), false);
   assert.equal(bearerOk('Bearer s3cret', 's3cret'), true);
+});
+
+test('the app’s mic books for the driver in the signed token; a bad token books nothing, demo account or not', async () => {
+  const { tool, booked, tick, cars, cfg } = setup();
+  cars.user_ana = 'car-ana';
+  const { quoteId } = await tool('quote_reservation', tomorrow, { account: 'user_ana' });
+  assert.equal((await tool('confirm_reservation', { quoteId }, { account: 'user_ana' })).status, 'confirmed');
+  assert.deepEqual([booked[0].account, booked[0].vehicleId], ['user_ana', 'car-ana']);
+
+  cfg.demoUserId = 'user_demo'; // must not rescue a bad token
+  const real = signVoiceToken('user_ana', SECRET, T0)!.token;
+  const altered = `${Buffer.from(JSON.stringify({ u: 'user_demo', exp: T0 + 15 * MIN })).toString('base64url')}.${real.split('.')[1]}`;
+  for (const token of [signVoiceToken('user_ana', 'not-our-secret', T0)!.token, altered, 'garbage', '']) {
+    const r = await tool('quote_reservation', tomorrow, { token });
+    assert.equal(r.status, 'error', `token ${JSON.stringify(token.slice(0, 12))}`);
+    assert.match(r.message, /start the call again from the mic/);
+  }
+  tick(16 * MIN);
+  assert.equal((await tool('quote_reservation', tomorrow, { token: real })).status, 'error', 'tokens last 15 minutes');
+  assert.equal(booked.length, 1);
+});
+
+test('a phone call has no token: it books for the demo account if one is set, otherwise points to the app', async () => {
+  const { tool, booked, cfg } = setup();
+  const phone = { token: null };
+  assert.match((await tool('quote_reservation', tomorrow, phone)).message, /works from the mic in the Baywatch app/);
+  cfg.demoUserId = 'user_demo';
+  const { quoteId } = await tool('quote_reservation', tomorrow, phone);
+  assert.equal((await tool('confirm_reservation', { quoteId }, phone)).status, 'confirmed');
+  assert.equal(booked[0].account, 'user_demo');
+});
+
+test('no car, no booking; and nothing at all unless VOICE_DEMO is on', async () => {
+  const { tool, cfg, cars, booked } = setup();
+  const { quoteId } = await tool('quote_reservation', tomorrow); // while the driver still has a car
+  delete cars.user_demo;
+  assert.match((await tool('quote_reservation', tomorrow)).message, /Add a car in the Baywatch app first/);
+  assert.match((await tool('confirm_reservation', { quoteId })).message, /Add a car/);
+  cars.user_demo = 'car-1';
+  cfg.enabled = false;
+  assert.match((await tool('confirm_reservation', { quoteId })).message, /switched off/);
+  assert.equal(booked.length, 0);
+});
+
+test('session tokens fail closed without a secret', () => {
+  assert.equal(signVoiceToken('user_a', undefined, T0), null);
+  const { token, expiresAt } = signVoiceToken('user_a', SECRET, T0)!;
+  assert.equal(expiresAt, T0 + 15 * MIN);
+  assert.equal(verifyVoiceToken(token, undefined, T0), null);
+  assert.equal(verifyVoiceToken(token, SECRET, T0), 'user_a');
 });

@@ -4,7 +4,6 @@ import {
   bayId,
   commandError,
   envelope,
-  evseUid,
   MAX_REQUESTS,
   parsePartnerTokens,
   partnerBay,

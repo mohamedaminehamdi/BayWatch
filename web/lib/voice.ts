@@ -1,9 +1,11 @@
-// Voice booking for the Vapi assistant ("Hey Siri, call Baywatch", or the mic in the app).
+// Voice booking for the Vapi assistant: the mic in the app, or "Hey Siri, call Baywatch".
 // The assistant calls quote_reservation, reads the quote back, and calls confirm_reservation only after the
 // caller says yes. A quote books nothing; confirming the same quote twice returns the same booking.
+// The app's mic books for the signed-in driver (a signed session token in the call's metadata); a phone call
+// books for the demo account, if one is set. Payment is simulated, so it all sits behind VOICE_DEMO=1.
 // Pure apart from the injected booking service, so `node --test` runs it as it is. Contract: docs/voice-booking.md.
 
-import { timingSafeEqual } from 'node:crypto';
+import { createHmac, timingSafeEqual } from 'node:crypto';
 import { BLOCK_MS, berlinTime, CLASSES, dayBlocks, earliestStart, HORIZON_MS, TZ } from './booking-rules.ts';
 import type { BayClass } from './booking-types.ts';
 
@@ -19,15 +21,22 @@ export type VoiceBay = { id: string; name: string; address: string; class: BayCl
 
 // What voice needs from the booking engine (booking v2). Only bays() can be booked by voice: directory
 // listings alone never are. book() takes simulated payment and throws `{ status: 409 }` when the slot is gone.
+// vehicle() is the driver's first registered car, or null.
 export interface BookingService {
   bays(): VoiceBay[];
   quote(bayId: string, start: number, blocks: number, account: string): { cents: number; valid: boolean; reason?: string; creditAppliedCents?: number };
-  book(account: string, slot: { bayId: string; start: number; blocks: number; priceCents: number }): Promise<{ id: string }>;
+  book(account: string, slot: { bayId: string; start: number; blocks: number; priceCents: number; vehicleId: string }): Promise<{ id: string }>;
+  vehicle(account: string): Promise<{ id: string } | null>;
 }
+
+// Who a call books for. `demoUserId` is for phone calls, which carry no session token.
+export type VoiceConfig = { enabled: boolean; secret: string | undefined; demoUserId?: string };
 
 type Call = { id: string; at: number }; // the Vapi call id and the moment relative dates are counted from
 type Slot = { bay: VoiceBay; start: number; blocks: number };
-type Quote = Slot & { id: string; callId: string; account: string; priceCents: number; creditCents: number; expiresAt: number; booking?: Promise<{ id: string }> };
+type Quote = Slot & { id: string; callId: string; account: string; priceCents: number; creditCents: number; expiresAt: number; confirming?: Promise<{ status: string }> };
+
+const NO_CAR = { status: 'error' as const, message: 'Add a car in the Baywatch app first, then I can book for you.' };
 
 const pad = (n: number) => String(n).padStart(2, '0');
 const end = (s: Slot) => s.start + s.blocks * BLOCK_MS;
@@ -107,12 +116,37 @@ function matchBays(place: string, bays: VoiceBay[]) {
   return best ? scored.filter((x) => x.score === best).map((x) => x.b) : [];
 }
 
+const same = (a: Buffer, b: Buffer) => a.length === b.length && timingSafeEqual(a, b);
+
 // Fails closed: without a configured secret nobody can book by voice
 export function bearerOk(header: string | null, secret: string | undefined) {
-  if (!secret) return false;
-  const a = Buffer.from(header ?? '');
-  const b = Buffer.from(`Bearer ${secret}`);
-  return a.length === b.length && timingSafeEqual(a, b);
+  return !!secret && same(Buffer.from(header ?? ''), Buffer.from(`Bearer ${secret}`));
+}
+
+// The app's mic: a short-lived token naming the signed-in driver, `<payload>.<signature>` in base64url.
+// Its key is derived from the bearer secret, so the secret itself never signs anything the browser holds.
+export const VOICE_TOKEN_TTL_MS = 15 * MINUTE;
+const tokenKey = (secret: string) => createHmac('sha256', secret).update('voice-session').digest();
+const sign = (payload: string, secret: string) => createHmac('sha256', tokenKey(secret)).update(payload).digest('base64url');
+
+export function signVoiceToken(userId: string, secret: string | undefined, now: number) {
+  if (!secret || !userId) return null;
+  const expiresAt = now + VOICE_TOKEN_TTL_MS;
+  const payload = Buffer.from(JSON.stringify({ u: userId, exp: expiresAt })).toString('base64url');
+  return { token: `${payload}.${sign(payload, secret)}`, expiresAt };
+}
+
+// The driver's user id, or null for a forged, altered or expired token
+export function verifyVoiceToken(token: unknown, secret: string | undefined, now: number) {
+  if (!secret || typeof token !== 'string') return null;
+  const [payload, sig, ...rest] = token.split('.');
+  if (!payload || !sig || rest.length || !same(Buffer.from(sig), Buffer.from(sign(payload, secret)))) return null;
+  try {
+    const { u, exp } = JSON.parse(Buffer.from(payload, 'base64url').toString());
+    return typeof u === 'string' && u && typeof exp === 'number' && now < exp ? u : null;
+  } catch {
+    return null;
+  }
 }
 
 export function createVoice({ service, now = Date.now }: { service: BookingService; now?: () => number }) {
@@ -154,8 +188,9 @@ export function createVoice({ service, now = Date.now }: { service: BookingServi
     priceCents: service.quote(s.bay.id, s.start, s.blocks, account).cents,
   });
 
-  function quote(args: Record<string, unknown>, call: Call, account: string) {
+  async function quote(args: Record<string, unknown>, call: Call, account: string) {
     const ask = (question: string) => ({ status: 'needs_clarification' as const, question });
+    if (!(await service.vehicle(account))) return NO_CAR;
     const t = now();
     const all = service.bays();
     const names = all.map((b) => b.name).join(', ');
@@ -224,17 +259,24 @@ export function createVoice({ service, now = Date.now }: { service: BookingServi
     const q = quotes.get(String(args.quoteId ?? ''));
     if (!q) return { status: 'error' as const, message: 'I can’t find that quote. Let me check the time again.' };
     if (q.callId !== call.id || q.account !== account) return { status: 'error' as const, message: 'That quote belongs to another call. Let me check the time again.' };
-    if (!q.booking) {
-      if (now() > q.expiresAt) return { status: 'expired' as const, message: 'That quote has expired. Shall I check the time again?' };
-      const current = service.quote(q.bay.id, q.start, q.blocks, account);
-      if (!current.valid) return { status: 'unavailable' as const, message: current.reason ?? 'That slot has just been taken.', alternatives: alternatives(q, service.bays(), account) };
-      if (current.cents !== q.priceCents) return { status: 'expired' as const, message: `The price is now ${spokenEuro(current.cents)}. Shall I quote it again?` };
-      // kept on the quote, so a repeated or parallel confirm waits for this one instead of booking twice
-      q.booking = service.book(account, { bayId: q.bay.id, start: q.start, blocks: q.blocks, priceCents: q.priceCents });
-      q.booking.catch(() => (q.booking = undefined)); // a failed booking can be confirmed again
-    }
+    // kept on the quote, so a repeated or parallel confirm gets the same booking instead of a second one;
+    // anything short of a booking is forgotten, so the caller can confirm again
+    q.confirming ??= attempt(q, call, account).then((r) => {
+      if (r.status !== 'confirmed') q.confirming = undefined;
+      return r;
+    });
+    return q.confirming;
+  }
+
+  async function attempt(q: Quote, call: Call, account: string) {
+    if (now() > q.expiresAt) return { status: 'expired' as const, message: 'That quote has expired. Shall I check the time again?' };
+    const current = service.quote(q.bay.id, q.start, q.blocks, account);
+    if (!current.valid) return { status: 'unavailable' as const, message: current.reason ?? 'That slot has just been taken.', alternatives: alternatives(q, service.bays(), account) };
+    if (current.cents !== q.priceCents) return { status: 'expired' as const, message: `The price is now ${spokenEuro(current.cents)}. Shall I quote it again?` };
+    const car = await service.vehicle(account);
+    if (!car) return NO_CAR;
     try {
-      const { id } = await q.booking;
+      const { id } = await service.book(account, { bayId: q.bay.id, start: q.start, blocks: q.blocks, priceCents: q.priceCents, vehicleId: car.id });
       return { status: 'confirmed' as const, bookingId: id, ...details(q, q.priceCents), confirmationText: `Booked: ${q.bay.name}, ${spokenWhen(q, call.at)}. It’s in your Baywatch app under Bookings.` };
     } catch (e) {
       const { status, message } = e as { status?: number; message?: string };
@@ -257,14 +299,29 @@ export function createVoice({ service, now = Date.now }: { service: BookingServi
     return a && typeof a === 'object' ? (a as Record<string, unknown>) : {};
   };
 
+  // Who the call books for. The token sits in the call's metadata, set by the app when it starts the call:
+  // Vapi never puts metadata into the prompt, so the model can't see or change it. Tool arguments and
+  // the caller's number are never used. A bad token never falls back to the demo account.
+  function accountOf(m: Record<string, unknown>, cfg: VoiceConfig): { account: string } | { message: string } {
+    if (!cfg.enabled) return { message: 'Voice booking is switched off.' };
+    type WithMeta = { assistantOverrides?: { metadata?: { voiceToken?: unknown } }; metadata?: { voiceToken?: unknown } };
+    const token = (m.call as WithMeta | undefined)?.assistantOverrides?.metadata?.voiceToken ?? (m.assistant as WithMeta | undefined)?.metadata?.voiceToken;
+    if (token !== undefined) {
+      const userId = verifyVoiceToken(token, cfg.secret, now());
+      return userId ? { account: userId } : { message: 'Your voice session has expired. Please start the call again from the mic in the Baywatch app.' };
+    }
+    return cfg.demoUserId ? { account: cfg.demoUserId } : { message: 'Voice booking works from the mic in the Baywatch app. Please open the app and tap the mic.' };
+  }
+
   // Vapi's server message. Only 'tool-calls' needs an answer: one result per toolCallId, as a flat string
-  // (an `error` makes the assistant say the call failed). The account comes from the server, never the call.
-  async function handle(payload: unknown, account: string) {
+  // (an `error` makes the assistant say the call failed).
+  async function handle(payload: unknown, cfg: VoiceConfig) {
     const m = (payload as { message?: Record<string, unknown> } | null)?.message;
     if (m?.type !== 'tool-calls') return {};
     const callInfo = (m.call ?? {}) as { id?: unknown; createdAt?: unknown };
     const at = [toMs(m.timestamp), toMs(callInfo.createdAt)].find(Number.isFinite) ?? now();
     const call: Call = { id: String(callInfo.id ?? ''), at };
+    const who = accountOf(m, cfg);
     const list = (m.toolCallList ?? (m.toolWithToolCallList as { toolCall?: ToolCall }[] | undefined)?.map((t) => t.toolCall) ?? []) as ToolCall[];
     const results = [];
     for (const tc of list) {
@@ -272,9 +329,10 @@ export function createVoice({ service, now = Date.now }: { service: BookingServi
       const name = String(tc?.function?.name ?? '');
       if (!call.id) results.push({ toolCallId, error: 'Missing call id' });
       else if (!Object.hasOwn(TOOLS, name)) results.push({ toolCallId, error: `Unknown tool: ${name}` });
+      else if ('message' in who) results.push({ toolCallId, result: JSON.stringify({ status: 'error', message: who.message }) });
       else {
         try {
-          const out = await TOOLS[name as keyof typeof TOOLS](parseArgs(tc.function?.arguments), call, account);
+          const out = await TOOLS[name as keyof typeof TOOLS](parseArgs(tc.function?.arguments), call, who.account);
           results.push({ toolCallId, result: JSON.stringify(out) });
         } catch (e) {
           console.error('voice tool failed:', e);

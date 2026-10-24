@@ -6,7 +6,6 @@ import { createSchedule, type Hardware } from './schedule.ts';
 
 const MIN = 60_000;
 const H = 60 * MIN;
-const DAY = 24 * H;
 const at = (hm: string, day = '2026-10-26') => Date.parse(`${day}T${hm}:00+01:00`); // a Monday, Berlin winter time
 const ANNA = 'user_anna';
 const BEN = 'user_ben';
@@ -260,8 +259,8 @@ test('"I’m at the bay": a real bay needs the camera or sensor to have just see
   assert.equal(calls.length, 1, 'simulated bays never call the hardware');
 });
 
-test('walk-up: a free bay, no booking within 30 min + the gap, until the next booking − the gap; idle fee after', async () => {
-  const { s, book, setNow, calls } = setup();
+test('walk-up: a free bay, no booking within 30 min + the gap, until the next booking − the gap; a real lock needs the driver’s own plate', async () => {
+  const { s, book, setNow, calls, advance } = setup();
   await book(BEN, 'bw-3', at('12:00'));
   const w = await s.unlock(ANNA, 'bw-3', HERE);
   assert.deepEqual([w.status, w.end, w.feeCents, w.checkInMethod], ['walkup', at('11:50'), 0, 'walkup']);
@@ -273,12 +272,22 @@ test('walk-up: a free bay, no booking within 30 min + the gap, until the next bo
   assert.deepEqual([done.status, done.totalCents], ['completed', 90], '3 min after the 5 free minutes');
   setNow(at('11:21'));
   await assert.rejects(s.unlock(ANNA, 'bw-3', HERE), { status: 409, message: /starts here soon/ });
-  await assert.rejects(s.unlock(ANNA, 'bw-1', HERE), { status: 409, message: /camera hasn’t seen your car/ });
-  s.carSeen('bw-1');
-  await assert.rejects(s.unlock(ANNA, 'bw-1', FAR), { status: 403 });
-  const real = await s.unlock(ANNA, 'bw-1', HERE);
+  const cars = [{ plate: 'MAB1234', label: 'Blue Zoe' }];
+  await assert.rejects(s.unlock(ANNA, 'bw-1', HERE, cars), { status: 409, message: 'Drive up so the camera can read your plate.' });
+  s.carSeen('bw-1', 'KLX4021');
+  await assert.rejects(s.unlock(ANNA, 'bw-1', HERE, cars), { status: 403, message: /isn’t one of your cars/ }, 'a stranger’s car');
+  s.carSeen('bw-1', 'M-AB 1234');
+  await assert.rejects(s.unlock(ANNA, 'bw-1', FAR, cars), { status: 403, message: /within 150 m/ });
+  const real = await s.unlock(ANNA, 'bw-1', HERE, cars);
   assert.equal(real.end, at('13:15'), 'no booking ahead: the class maximum (2 h) from the current block (11:15)');
+  assert.deepEqual([real.plateHint, real.vehicleLabel], ['MA•••34', 'Blue Zoe']);
   assert.deepEqual(calls, ['lower lock-0002']);
+  setNow(at('11:30'));
+  s.finish(ANNA, real.id);
+  s.carSeen('bw-1', 'MAB1234');
+  setNow(at('11:34'));
+  await advance(0);
+  await assert.rejects(s.unlock(BEN, 'bw-1', HERE, cars), { status: 409, message: /read your plate/ }, 'a read over 3 min old is forgotten');
 });
 
 test('reminders: start ones only before the car arrives, end ones only while it’s in the bay', async () => {

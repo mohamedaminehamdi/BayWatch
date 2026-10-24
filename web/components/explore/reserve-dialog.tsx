@@ -1,8 +1,8 @@
 'use client';
 
-import { Check, CreditCard, TriangleAlert, WifiOff } from 'lucide-react';
+import { CarFront, Check, CreditCard, TriangleAlert, WifiOff } from 'lucide-react';
 import { useRouter } from 'next/navigation';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { api } from '@/components/api';
 import { useAppState } from '@/components/app/app-state';
 import { formatTime, useNow } from '@/components/time';
@@ -12,6 +12,8 @@ import { PlateBadge } from '@/components/ui/plate-badge';
 import { VehicleForm } from '@/components/vehicles/vehicle-form';
 import { bayOffline, OFFLINE_TEXT } from './panels';
 import { bookingTerms, formatEuro, MAX_RESERVATION_CENTS } from '@/lib/pricing';
+import { earliestStart } from '@/lib/booking-rules';
+import type { Bay } from '@/lib/booking-types';
 import type { Vehicle } from '@/lib/vehicles';
 
 const MIN = 60_000;
@@ -20,7 +22,15 @@ const focusRing = 'has-focus-visible:outline-3 has-focus-visible:outline-offset-
 export const formatLength = (minutes: number) =>
   minutes < 60 ? `${minutes} min` : `${Math.floor(minutes / 60)} h${minutes % 60 ? ` ${minutes % 60}` : ''}`;
 
-export function ReserveDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
+// What to do about a refusal, next to the Pay button
+const nextStep = (message: string) =>
+  /price is now/i.test(message)
+    ? 'The price above is updated. Check it, then pay again.'
+    : /car is (over the arm|in the bay)|another car/i.test(message)
+      ? 'Pick another Baywatch bay, or try again once the car has left.'
+      : 'Nothing was booked. Try again in a moment.';
+
+export function ReserveDialog({ bay, open, onClose }: { bay?: Bay | null; open: boolean; onClose: () => void }) {
   const router = useRouter();
   const { state, refresh } = useAppState();
   const now = useNow();
@@ -30,6 +40,12 @@ export function ReserveDialog({ open, onClose }: { open: boolean; onClose: () =>
   const [accepted, setAccepted] = useState(false);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+  const errorRef = useRef<HTMLDivElement>(null);
+
+  // a refusal shows next to the Pay button: bring it into view, wherever the dialog was scrolled to
+  useEffect(() => {
+    if (error) errorRef.current?.scrollIntoView({ block: 'nearest' });
+  }, [error]);
 
   useEffect(() => {
     if (!open) return;
@@ -46,13 +62,22 @@ export function ReserveDialog({ open, onClose }: { open: boolean; onClose: () =>
   const { quote: q, session } = state;
   const length = minutes ?? (session.presets.includes(60) ? 60 : session.presets[0]);
   const terms = bookingTerms({ type: q.type, feeCents: q.cents, prepaid: q.prepaid, graceMinutes: state.holdMinutes });
-  const offline = bayOffline(state);
+  // Baywatch Bay 1 books the old way; the other Baywatch bays (same class, same price) from the next block by id
+  const target = bay && bay.id !== state.bay.id ? bay : null;
+  const name = bay?.name ?? state.bay.name;
+  const offline = bay ? bay.status === 'offline' : bayOffline(state);
+  const occupied = bay?.status === 'occupied';
 
   async function pay() {
     setBusy(true);
     setError('');
     try {
-      await api('POST', '/api/reservations', { vehicleId: carId, minutes: length, priceCents: q.cents, acceptFees: true, payment: 'demo' });
+      const common = { vehicleId: carId, priceCents: q.cents, acceptFees: true, payment: 'demo' };
+      await api(
+        'POST',
+        '/api/reservations',
+        target ? { ...common, bayId: target.id, start: earliestStart(Date.now()), blocks: Math.ceil(length / 15) } : { ...common, minutes: length },
+      );
       await refresh();
       router.push('/booking');
     } catch (e) {
@@ -63,7 +88,7 @@ export function ReserveDialog({ open, onClose }: { open: boolean; onClose: () =>
   }
 
   return (
-    <Dialog open={open} onClose={onClose} title={`Book ${state.bay.name}`}>
+    <Dialog open={open} onClose={onClose} title={`Book ${name}`}>
       {cars === null && !error && <div className="h-40 animate-pulse rounded-2xl bg-sunken" />}
 
       {cars?.length === 0 && (
@@ -160,7 +185,24 @@ export function ReserveDialog({ open, onClose }: { open: boolean; onClose: () =>
                 {OFFLINE_TEXT}
               </p>
             )}
-            <Button size="lg" className="w-full" loading={busy} disabled={!carId || !accepted || offline} onClick={pay}>
+            {occupied && (
+              <p role="status" className="mb-3 flex gap-3 rounded-2xl bg-warn-tint p-4 text-ink">
+                <CarFront aria-hidden className="mt-0.5 size-5 shrink-0 text-warn" />
+                <span>
+                  <span className="font-semibold">A car is in the bay right now,</span> so it can’t be booked for now. Try another Baywatch bay.
+                </span>
+              </p>
+            )}
+            {error && (
+              <div ref={errorRef} role="alert" className="mb-3 flex gap-3 rounded-2xl bg-danger-tint p-4">
+                <TriangleAlert aria-hidden className="mt-0.5 size-5 shrink-0 text-danger" />
+                <div>
+                  <p className="font-semibold text-danger">{error}</p>
+                  <p className="mt-1 text-ink">{nextStep(error)}</p>
+                </div>
+              </div>
+            )}
+            <Button size="lg" className="w-full" loading={busy} disabled={!carId || !accepted || offline || occupied} onClick={pay}>
               <CreditCard className="size-5" /> Pay {formatEuro(q.cents)} and book
             </Button>
             <p className="mt-2 text-center font-mono text-xs uppercase tracking-[0.08em] text-muted">Demo payment: no card is charged.</p>
@@ -168,7 +210,7 @@ export function ReserveDialog({ open, onClose }: { open: boolean; onClose: () =>
         </div>
       )}
 
-      {error && (
+      {error && !cars?.length && (
         <p role="alert" className="mt-4 text-danger">
           {error}
         </p>

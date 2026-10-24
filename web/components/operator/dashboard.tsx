@@ -21,6 +21,8 @@ const EMAIL = {
 
 const percent = (x: number | null) => (x === null ? '–' : `${Math.round(x * 100)}%`);
 const minutes = (ms: number | null) => (ms === null ? '–' : `${Math.max(1, Math.round(ms / 60_000))} min`);
+// arrivals against the booked start: "+4 min" late, "3 min early"
+const arrival = (ms: number | null) => (ms === null ? '–' : ms < 0 ? `${Math.round(-ms / 60_000)} min early` : `+${Math.round(ms / 60_000)} min`);
 
 function Tile({ label, value, context }: { label: string; value: string; context: string }) {
   return (
@@ -32,44 +34,58 @@ function Tile({ label, value, context }: { label: string; value: string; context
   );
 }
 
-function LiveBay({ data, now, onLower }: { data: OperatorData; now: number; onLower: () => void }) {
-  const r = data.reservation;
-  const [status, detail] = data.blockedSince
-    ? ['Car in the bay', `No booking, since ${formatTime(data.blockedSince)} (${formatCountdown(now - data.blockedSince)})`]
-    : r?.status === 'reserved'
-      ? ['Reserved', `Held until ${formatTime(r.expiresAt)}`]
-      : r?.status === 'arrived'
-        ? ['Driver checked in', 'Guard down, about to charge']
-        : r?.status === 'charging'
-          ? ['Charging', 'Booked session in progress']
-          : ['Free', 'Open to anyone, and reservable'];
-  const hw = hardwarePanel(data.hardware, !!r, formatTime);
+type LiveBayData = OperatorData['bays'][number];
+
+// One Baywatch bay, live: what's happening there, and its lock (if it has one)
+function LiveBay({ b, now, onLower }: { b: LiveBayData; now: number; onLower: (bayId: string) => void }) {
+  const r = b.booking;
+  const [status, detail] = b.blockedSince
+    ? [r?.blockedSince ? 'Blocked' : 'Car in the bay', `${r?.blockedSince ? 'A car without this booking' : 'No booking'}, since ${formatTime(b.blockedSince)} (${formatCountdown(now - b.blockedSince)})`]
+    : r?.status === 'live'
+      ? ['Booked: arriving', `Arrive by ${formatTime(r.arriveBy)}, session until ${formatTime(r.end)}`]
+      : r?.status === 'upcoming'
+        ? ['Free until the next booking', `Next booking ${formatTime(r.start)}–${formatTime(r.end)}`]
+        : r?.status === 'arrived'
+          ? ['Driver checked in', `Guard down, session until ${formatTime(r.end)}`]
+          : r?.status === 'charging'
+            ? ['Charging', `Booked session until ${formatTime(r.end)}`]
+            : r?.status === 'walkup'
+              ? ['Walk-up', `Unlocked at the bay, free until ${formatTime(r.end)}`]
+              : ['Free', 'Guarded, bookable, and open for walk-up'];
+  const inSession = r?.status === 'arrived' || r?.status === 'charging' || r?.status === 'walkup';
+  const hw = b.lockId ? hardwarePanel(b.hardware, inSession, formatTime) : null;
   return (
-    <section aria-label="Live bay" className="rounded-3xl bg-brand-deep p-6 text-on-brand">
+    <section aria-label={`Live: ${b.bay.name}`} className="rounded-3xl bg-brand-deep p-6 text-on-brand">
       <p className="flex items-center gap-2 font-mono text-xs font-semibold uppercase tracking-[0.1em] text-on-brand-muted">
         <span className="relative flex size-2.5">
           <span className="absolute inset-0 animate-ping rounded-full bg-mint/70" />
           <span className="relative size-2.5 rounded-full bg-mint" />
         </span>
-        Live · {data.bay.name}
+        Live · {b.bay.name}
       </p>
       <p className="mt-3 font-display text-4xl leading-[0.9] tracking-[0.012em]">{status}</p>
       <p className="mt-2 text-on-brand">{detail}</p>
       <p className="mt-5 flex flex-wrap items-center gap-2 border-t border-white/14 pt-4 font-mono text-xs uppercase tracking-[0.08em] text-on-brand-muted">
         <ShieldCheck className="size-4 text-mint" />
-        Guard {hw.guard}
-        {data.hardware.mock ? (
-          ' · mock hardware'
+        {!hw ? (
+          'No hardware assigned yet · simulated guard'
         ) : (
-          <span className={`${chipClass} ${hw.online ? 'bg-mint/15 text-mint' : 'bg-danger text-white'}`}>{hw.online ? 'Online' : 'Offline'}</span>
+          <>
+            Guard {hw.guard} · {b.lockId}
+            {b.hardware.mock ? (
+              ' · mock hardware'
+            ) : (
+              <span className={`${chipClass} ${hw.online ? 'bg-mint/15 text-mint' : 'bg-danger text-white'}`}>{hw.online ? 'Online' : 'Offline'}</span>
+            )}
+          </>
         )}
       </p>
-      {hw.warnings.map((w) => (
+      {hw?.warnings.map((w) => (
         <p key={w} role="alert" className="mt-3 flex gap-2 rounded-xl bg-warn-tint p-3 text-sm font-medium text-warn">
           <TriangleAlert className="mt-0.5 size-4 shrink-0" /> {w}
         </p>
       ))}
-      {hw.rows.length > 0 && (
+      {hw && hw.rows.length > 0 && (
         <dl className="mt-4 grid grid-cols-2 gap-x-4 gap-y-2.5 text-sm">
           {hw.rows.map(([k, v]) => (
             <div key={k} className={k === 'Reading' ? 'col-span-2' : 'min-w-0'}>
@@ -79,9 +95,11 @@ function LiveBay({ data, now, onLower }: { data: OperatorData; now: number; onLo
           ))}
         </dl>
       )}
-      <Button variant="on-brand" size="sm" className="mt-5" onClick={onLower}>
-        <ArrowDownToLine className="size-4" /> Lower the arm
-      </Button>
+      {hw && (
+        <Button variant="on-brand" size="sm" className="mt-5" onClick={() => onLower(b.bay.id)}>
+          <ArrowDownToLine className="size-4" /> Lower the arm
+        </Button>
+      )}
     </section>
   );
 }
@@ -91,7 +109,7 @@ export function OperatorDashboard() {
   const [data, setData] = useState<OperatorData | null>(null);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState<string | null>(null);
-  const [lowering, setLowering] = useState(false);
+  const [lowering, setLowering] = useState<string | null>(null); // the bay whose arm to lower
 
   const load = useCallback(async () => {
     try {
@@ -127,6 +145,15 @@ export function OperatorDashboard() {
   const resolved = data.alerts.filter((a) => a.status === 'resolved' && !a.simulated).slice(0, 3);
   const k = data.stats.kpis;
   const checkIns = k.cameraCheckIns + k.fallbackCheckIns;
+  const bayName = (id: string) => data.bays.find((b) => b.bay.id === id)?.bay.name ?? id;
+  const lowerBay = lowering ? bayName(lowering) : '';
+  const live = (
+    <div className="grid gap-4">
+      {data.bays.map((b) => (
+        <LiveBay key={b.bay.id} b={b} now={now} onLower={setLowering} />
+      ))}
+    </div>
+  );
 
   return (
     <div className="mx-auto w-full max-w-7xl px-5 py-8 sm:px-8 lg:py-10">
@@ -135,7 +162,7 @@ export function OperatorDashboard() {
           <p className="font-mono text-xs font-medium uppercase tracking-[0.12em] text-muted">Bay Guard</p>
           <h1 className="mt-1 font-display text-4xl leading-[0.95] tracking-[0.012em]">Operator dashboard</h1>
           <p className="mt-1 text-muted">
-            {data.bay.name} · {data.bay.address} · last 7 days
+            {data.bays.length} Baywatch bays · {data.bays[0]?.bay.address} · last 7 days
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-3">
@@ -173,11 +200,11 @@ export function OperatorDashboard() {
                   <article key={a.id} className="grid gap-4 rounded-3xl bg-warn-tint p-5 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center sm:p-6">
                     <div className="min-w-0">
                       <p className="flex items-center gap-2 font-semibold text-warn">
-                        <TriangleAlert className="size-5" /> A car without a booking is in a reserved bay
+                        <TriangleAlert className="size-5" /> {bayName(a.bayId)}: a car without a booking is in the booked bay
                       </p>
                       <p className="mt-2 text-lg">
                         Since {formatTime(a.since)} · <span className="font-mono font-semibold">{formatCountdown(now - a.since)}</span> and counting.
-                        The waiting driver’s hold is paused.
+                        The driver’s arrival deadline waits, and they got a €5 credit.
                       </p>
                       <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2">
                         {a.plate && <PlateBadge plate={a.plate} size="sm" />}
@@ -190,7 +217,7 @@ export function OperatorDashboard() {
                       <Button size="lg" loading={busy === a.id} onClick={() => run(a.id, () => api('POST', `/api/operator/alerts/${a.id}/resolve`))}>
                         <CircleCheck className="size-5" /> Bay is clear
                       </Button>
-                      <p className="mt-2 max-w-[24ch] text-sm text-muted">Resumes the driver’s hold and deletes the plate.</p>
+                      <p className="mt-2 max-w-[24ch] text-sm text-muted">The booking carries on, and the plate is deleted.</p>
                     </div>
                   </article>
                 );
@@ -201,7 +228,7 @@ export function OperatorDashboard() {
                   <div>
                     <p className="font-semibold">No open alerts</p>
                     <p className="mt-1 text-muted">
-                      When a car without a booking stands in a reserved bay, it shows up here and operators get an email.
+                      When a car without a booking stands in a booked bay, it shows up here and operators get an email.
                     </p>
                   </div>
                 </div>
@@ -210,7 +237,7 @@ export function OperatorDashboard() {
                 <ul className="grid gap-1.5 text-sm text-muted">
                   {resolved.map((a) => (
                     <li key={a.id}>
-                      Resolved at {formatTime(a.resolvedAt ?? a.since)} by {a.resolvedBy === 'camera' ? 'the camera (car left)' : 'an operator'}, after{' '}
+                      {bayName(a.bayId)}: resolved at {formatTime(a.resolvedAt ?? a.since)} by {a.resolvedBy === 'operator' ? 'an operator' : 'the bay (the car left)'}, after{' '}
                       {minutes((a.resolvedAt ?? a.since) - a.since)}. Plate deleted.
                     </li>
                   ))}
@@ -220,24 +247,37 @@ export function OperatorDashboard() {
           </section>
 
           {/* on phones the live bay comes right after the alerts; on desktop it heads the side column */}
-          <div className="lg:hidden">
-            <LiveBay data={data} now={now} onLower={() => setLowering(true)} />
-          </div>
+          <div className="lg:hidden">{live}</div>
 
           <section aria-labelledby="kpis">
             <h2 id="kpis" className="font-display text-3xl leading-none tracking-[0.012em]">
               The last 7 days
             </h2>
             <div className="mt-3 grid grid-cols-2 gap-3 xl:grid-cols-4">
-              <Tile label="Reservations" value={String(k.reservations)} context={`${k.ended} finished`} />
+              <Tile label="Reservations" value={String(k.reservations)} context={`${k.ended} finished · ${k.walkups} walk-ups`} />
               <Tile label="Completed" value={percent(k.completionRate)} context="of finished bookings" />
-              <Tile label="No-shows" value={percent(k.noShowRate)} context="released automatically" />
-              <Tile label="Time to arrive" value={minutes(k.avgArriveMs)} context="booking to check-in, on average" />
+              <Tile label="No-shows" value={percent(k.noShowRate)} context="the whole fee kept" />
+              <Tile label="Arrival" value={arrival(k.avgArriveMs)} context="against the booked start, on average" />
               <Tile label="Blocked incidents" value={String(k.blockedIncidents)} context={`${k.blockedMinutes} min blocked in total`} />
-              <Tile label="Checked in by camera" value={percent(checkIns ? k.cameraCheckIns / checkIns : null)} context={`${k.fallbackCheckIns} at the bay without it`} />
-              <Tile label="Misreads matched" value={String(k.fuzzyMatches)} context="plates read wrongly, still let in" />
-              <Tile label="Your revenue share" value={formatEuro(k.cpoShareCents)} context={`${Math.round(CPO_SHARE * 100)}% of ${formatEuro(k.revenueCents)} in fees`} />
+              <Tile label="Checked in by camera" value={percent(checkIns ? k.cameraCheckIns / checkIns : null)} context={`${k.fallbackCheckIns} at the bay without it · ${k.fuzzyMatches} misreads matched`} />
+              <Tile label="Credits issued" value={formatEuro(k.creditsIssuedCents)} context={`€5 per blocked bay · ${formatEuro(k.creditsUsedCents)} used, free first bookings included`} />
+              <Tile label="Idle fees" value={formatEuro(k.overstayCents)} context={`${formatEuro(k.overstaySplit.operatorCents)} to you, ${formatEuro(k.overstaySplit.platformCents)} to the platform`} />
+              <Tile
+                label="Your revenue share"
+                value={formatEuro(k.cpoShareCents)}
+                context={`${Math.round(CPO_SHARE * 100)}% of reservation fees and half the idle fees, of ${formatEuro(k.revenueCents)}`}
+              />
             </div>
+            {data.stats.bays.length > 0 && (
+              <ul className="mt-3 grid gap-1.5 text-sm text-muted">
+                {data.stats.bays.map((b) => (
+                  <li key={b.bayId}>
+                    <span className="font-semibold text-ink">{bayName(b.bayId)}</span>: {b.reservations} bookings, {b.completed} completed, {b.noShows} no-shows,{' '}
+                    {b.walkups} walk-ups · {formatEuro(b.revenueCents)}
+                  </li>
+                ))}
+              </ul>
+            )}
           </section>
 
           <section aria-labelledby="per-day" className="min-w-0 rounded-2xl bg-surface p-5 ring-1 ring-line sm:p-6">
@@ -250,9 +290,7 @@ export function OperatorDashboard() {
         </div>
 
         <div className="grid gap-6">
-          <div className="hidden lg:block">
-            <LiveBay data={data} now={now} onLower={() => setLowering(true)} />
-          </div>
+          <div className="hidden lg:block">{live}</div>
           <section aria-labelledby="log" className="rounded-2xl bg-surface p-5 ring-1 ring-line">
             <h2 id="log" className="font-display text-2xl leading-none tracking-[0.012em]">
               Event log
@@ -273,20 +311,18 @@ export function OperatorDashboard() {
         </div>
       </div>
 
-      <Dialog open={lowering} onClose={() => setLowering(false)} title="Lower the arm?">
+      <Dialog open={!!lowering} onClose={() => setLowering(null)} title={`Lower the arm of ${lowerBay}?`}>
         <p className="text-lg">Any car can then park in the bay.</p>
-        <p className="mt-2 text-muted">
-          For when the arm is up without a booking, or a command timed out. A booking in progress isn’t changed.
-        </p>
+        <p className="mt-2 text-muted">For a driver who can’t get in, or after a command timed out. A booking in progress isn’t changed.</p>
         <div className="mt-6 flex flex-wrap gap-3">
           <Button
             size="lg"
             loading={busy === 'lower'}
-            onClick={() => run('lower', () => api('POST', '/api/operator/hardware/lower')).then(() => setLowering(false))}
+            onClick={() => run('lower', () => api('POST', '/api/operator/hardware/lower', { bayId: lowering })).then(() => setLowering(null))}
           >
             Lower the arm
           </Button>
-          <Button variant="secondary" size="lg" onClick={() => setLowering(false)}>
+          <Button variant="secondary" size="lg" onClick={() => setLowering(null)}>
             Not now
           </Button>
         </div>

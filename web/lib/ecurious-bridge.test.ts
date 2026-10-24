@@ -4,56 +4,59 @@ import { createBridge } from './ecurious-bridge.ts';
 import type { HwEvent } from './ecurious-events.ts';
 
 const BOOKED = 'MAB1234';
-const BAY = 'lock-0002';
-const photo = (plate: string, lockId = BAY): HwEvent => ({ type: 'photo', lockId, plate });
-const occupied: HwEvent = { type: 'presence', lockId: BAY, presence: 'occupied' };
-const vacant: HwEvent = { type: 'presence', lockId: BAY, presence: 'vacant' };
+const LOCK = 'lock-0002';
+const photo = (plate: string, lockId = LOCK): HwEvent => ({ type: 'photo', lockId, plate });
+const occupied: HwEvent = { type: 'presence', lockId: LOCK, presence: 'occupied' };
+const vacant: HwEvent = { type: 'presence', lockId: LOCK, presence: 'vacant' };
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-// A stand-in for the reservation engine: BOOKED checks in while reserved, and the session completes when the car leaves
-function setup(status: string | null = 'reserved', presence = 'vacant') {
+// A stand-in for the booking engine: BOOKED checks in while held, and the session completes when the car leaves
+function setup(status: string | null = 'live', presence = 'vacant') {
   const calls: string[] = [];
   let t = 0;
   const engine = {
     status,
-    async plateEvent(plate: unknown, dir: 'in' | 'out' = 'in') {
-      calls.push(`${dir}:${plate}`);
-      const matched = plate === BOOKED && (dir === 'in' ? this.status === 'reserved' : this.status === 'arrived');
-      if (matched) this.status = dir === 'in' ? 'arrived' : 'completed';
+    async plateEvent(bayId: string, plate: unknown) {
+      calls.push(`in ${bayId}:${plate}`);
+      const matched = plate === BOOKED && this.status === 'live';
+      if (matched) this.status = 'arrived';
       return { matched };
     },
-    vacated() {
-      calls.push('out');
+    vacated(bayId: string) {
+      calls.push(`out ${bayId}`);
       if (this.status === 'arrived') this.status = 'completed';
     },
-    state() {
-      return { reservation: this.status ? { status: this.status } : null };
+    held() {
+      return this.status === 'live';
+    },
+    carSeen(bayId: string, plate: unknown) {
+      calls.push(`seen ${bayId}:${plate}`);
     },
   };
-  const bridge = createBridge(engine, { lockId: BAY, presence, vacantMs: 20, now: () => t });
+  const bridge = createBridge(engine, { bayId: 'bw-1', lockId: LOCK, presence, vacantMs: 20, now: () => t });
   return { engine, calls, bridge, advance: (ms: number) => (t += ms) };
 }
 
-test('a plate read while the bay is held checks in at once; other bays are ignored', async () => {
+test('a plate read while the bay is held checks in at once; other locks are ignored', async () => {
   const { bridge, calls, engine } = setup();
   await bridge.handle(photo(BOOKED, 'lock-0003'));
   await bridge.handle(photo(BOOKED));
-  assert.deepEqual(calls, ['in:MAB1234']);
+  assert.deepEqual(calls, ['seen bw-1:MAB1234', 'in bw-1:MAB1234']);
   assert.equal(engine.status, 'arrived');
 });
 
-test('an unbooked bay: a car driving past changes nothing, a car pulling in is reported with its plate', async () => {
+test('a bay with nothing booked: a car driving past is only seen; a car pulling in is reported with its plate', async () => {
   const { bridge, calls, advance } = setup(null);
   await bridge.handle(photo('BXY99'));
-  assert.deepEqual(calls, [], 'read, but the sensor still says vacant');
+  assert.deepEqual(calls, ['seen bw-1:BXY99'], 'read, but the sensor still says vacant');
   await bridge.handle(occupied);
-  assert.deepEqual(calls, ['in:BXY99']);
+  assert.deepEqual(calls.slice(1), ['in bw-1:BXY99']);
   await bridge.handle(vacant);
   await sleep(40);
   await bridge.handle(photo('BXY99'));
   advance(3 * 60_000);
   await bridge.handle(occupied);
-  assert.deepEqual(calls, ['in:BXY99', 'out', 'in:'], 'a read 3 min before the car pulled in is too old: unreadable');
+  assert.deepEqual(calls.slice(1), ['in bw-1:BXY99', 'out bw-1', 'seen bw-1:BXY99', 'in bw-1:'], 'a read 3 min before the car pulled in is too old: unreadable');
 });
 
 test('the car left: only once the bay stayed empty, and with no plate needed; a sensor flicker does nothing', async () => {
@@ -67,7 +70,7 @@ test('the car left: only once the bay stayed empty, and with no plate needed; a 
   assert.equal(engine.status, 'arrived');
   await bridge.handle(vacant);
   await sleep(40);
-  assert.equal(calls.at(-1), 'out');
+  assert.equal(calls.at(-1), 'out bw-1');
   assert.equal(engine.status, 'completed');
 });
 
@@ -82,7 +85,7 @@ test('a repeated vacant reading keeps the departure; the next car keeps its plat
   await sleep(40);
   assert.equal(engine.status, 'completed');
   await bridge.handle(occupied);
-  assert.equal(calls.at(-1), 'in:BXY99');
+  assert.equal(calls.at(-1), 'in bw-1:BXY99');
 });
 
 test('vacant without a car before it is not a departure', async () => {
@@ -98,19 +101,20 @@ test('events are applied one at a time, and a failing one does not stop the next
   const logged = t.mock.method(console, 'error', () => {});
   const order: string[] = [];
   const engine = {
-    async plateEvent(plate: unknown) {
+    async plateEvent(_bayId: string, plate: unknown) {
       order.push(`start ${plate}`);
       await sleep(15); // the arm moving
       order.push(`end ${plate}`);
-      if (plate === 'FAIL') throw new Error('Could not release the bay: HTTP 502');
+      if (plate === 'FAIL') throw new Error('Could not lower the arm: HTTP 502');
       return { matched: false };
     },
     vacated() {},
-    state: () => ({ reservation: { status: 'reserved' } }),
+    held: () => true,
+    carSeen() {},
   };
-  const bridge = createBridge(engine, { lockId: BAY });
+  const bridge = createBridge(engine, { bayId: 'bw-1', lockId: LOCK });
   void bridge.handle(photo('FAIL'));
   await bridge.handle(photo('NEXT'));
   assert.deepEqual(order, ['start FAIL', 'end FAIL', 'start NEXT', 'end NEXT']);
-  assert.match(String(logged.mock.calls[0].arguments[0]), /event not applied: Could not release the bay/);
+  assert.match(String(logged.mock.calls[0].arguments[0]), /event not applied: Could not lower the arm/);
 });

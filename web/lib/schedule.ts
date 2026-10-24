@@ -134,7 +134,8 @@ export type LogEntry = { at: number; type: string; detail: string; bayId?: strin
 
 type Site = {
   blocker: { since: number } | null; // a car without a booking is in the bay
-  seenAt: number; // when the camera or the sensor last saw a car (walk-up evidence)
+  seenAt: number; // when the camera or the sensor last saw a car
+  seenPlate?: { plate: string; at: number }; // the camera's last read, for walk-up: in memory, for EVIDENCE_MS at most
   occupied: boolean; // simulated bays: the demo's "car in bay"
   loweredForSession: boolean; // the arm went down for a session: raise it once that car has left
   hw?: { online: boolean; carPresence: 'occupied' | 'vacant' | null; mock: boolean }; // the lock, as last read
@@ -345,7 +346,7 @@ export function createSchedule({
   function quoteWith(viewerId: string | null, bayId: string, start: number, blocks: number, w: Wallet): Quote {
     const bay = bayOf(bayId);
     const t = now();
-    const fee = priced(bay, start);
+    const fee = priced(bay, Number.isFinite(start) ? start : t); // a bad start is reported, not thrown
     const end = start + blocks * BLOCK_MS;
     const reason = slotProblem(bay.class, start, blocks, t) ?? conflict(viewerId, bay, start, end);
     const credit = w.firstFree ? fee.cents : Math.min(w.creditCents, fee.cents);
@@ -627,8 +628,10 @@ export function createSchedule({
     return view(b); // the coordinates are not kept
   }
 
-  // Walk-up: a driver at a free bay unlocks it without booking, until the next booking's start − the gap
-  async function unlock(ownerId: string, bayId: string, pos: { lat?: unknown; lng?: unknown }) {
+  // Walk-up: a driver at a free bay unlocks it without booking, until the next booking's start − the gap. On a
+  // real lock the camera must just have read the plate of one of the driver's own cars: bay-wide evidence plus a
+  // location (which can be spoofed) would let anyone unlock a stranger's car and bill it to the wrong account.
+  async function unlock(ownerId: string, bayId: string, pos: { lat?: unknown; lng?: unknown }, cars: { plate: string; label: string }[] = []) {
     const bay = bayOf(bayId);
     const st = site(bayId);
     const t = now();
@@ -637,7 +640,13 @@ export function createSchedule({
     if (!bay.lockId && (st.blocker || st.occupied)) fail(409, 'Another car is in the bay');
     const o = open(bayId);
     if (o.some((b) => b.status === 'booked' && b.start - t < WALKUP_CLEAR_MS + MIN_GAP_MS)) fail(409, 'A booking starts here soon. Book a slot instead.');
-    if (bay.lockId && t - st.seenAt > EVIDENCE_MS) fail(409, 'The bay camera hasn’t seen your car yet. Drive up to the guard first.');
+    let car: { plate: string; label: string } | undefined;
+    if (bay.lockId) {
+      const read = st.seenPlate && t - st.seenPlate.at <= EVIDENCE_MS ? st.seenPlate.plate : null;
+      if (!read) fail(409, 'Drive up so the camera can read your plate.');
+      car = cars.find((c) => samePlate(read, c.plate));
+      if (!car) fail(403, 'The camera read a plate that isn’t one of your cars. Add the car to your account, or book the bay.');
+    }
     const here = { lat: Number(pos?.lat), lng: Number(pos?.lng) };
     if (!Number.isFinite(here.lat) || !Number.isFinite(here.lng)) fail(400, 'Your location is needed to unlock the bay');
     if (distanceM(bay, here) > GEOFENCE_M) fail(403, `Unlock from the bay (within ${GEOFENCE_M} m)`);
@@ -651,9 +660,9 @@ export function createSchedule({
       ownerId,
       kind: 'walkup',
       status: 'arrived', // before the await: nobody else can unlock meanwhile
-      plate: null,
+      plate: car ? normalizePlate(car.plate) : null,
       extraPlate: null,
-      vehicleLabel: 'Walk-up',
+      vehicleLabel: car?.label ?? 'Walk-up',
       createdAt: t,
       start: t,
       end: until,
@@ -680,6 +689,7 @@ export function createSchedule({
       fail(502, `Could not lower the arm: ${message(e)}`);
     }
     st.blocker = null;
+    st.seenPlate = undefined;
     note('walkup', `unlocked at the bay, free until ${time(until)}`, bayId);
     return view(b);
   }
@@ -838,6 +848,7 @@ export function createSchedule({
     if (ticking) return; // a slow hardware call must not stack ticks
     ticking = true;
     try {
+      for (const st of sites.values()) if (st.seenPlate && now() - st.seenPlate.at > EVIDENCE_MS) st.seenPlate = undefined;
       await syncHardware();
       for (const b of all.filter((x) => OPEN.includes(x.status))) {
         sendDueReminders(b);
@@ -976,7 +987,13 @@ export function createSchedule({
     plateEvent,
     vacated,
     held: (bayId: string) => !!liveOn(bayId),
-    carSeen: (bayId: string) => void (site(bayId).seenAt = now()), // a plate read in front of a raised arm
+    // a car in front of the arm (the bridge, on every camera read): the plate is kept for walk-up only
+    carSeen: (bayId: string, plate?: unknown) => {
+      const st = site(bayId);
+      st.seenAt = now();
+      const read = normalizePlate(plate);
+      st.seenPlate = read ? { plate: read, at: now() } : st.seenPlate;
+    },
     // timer, demo and operator
     tick,
     setOccupied,

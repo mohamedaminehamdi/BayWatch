@@ -1,7 +1,7 @@
 // Live camera and car-sensor events from the Ecurious server → the booking engine (schedule.ts), one bridge per
 // Baywatch bay with a lock. instrumentation.ts starts them once per server process, in live hardware mode only.
 // Events for other locks are ignored.
-//   plate read         → carSeen(bay) (walk-up evidence), and plateEvent(bay, plate) when a booking is live or a car
+//   plate read         → carSeen(bay, plate) (walk-up evidence), and plateEvent(bay, plate) when a booking is live or a car
 //                        is already on the sensor: checks the booked car in (the engine lowers the arm). In a bay
 //                        with nothing booked it waits until a car really pulls in, so a car driving past is ignored.
 //   sensor: occupied   → plateEvent(bay, <plate read in the last 2 min, or '' = unreadable>)
@@ -15,7 +15,7 @@ type Engine = {
   plateEvent(bayId: string, plate: unknown): Promise<{ matched: boolean }>;
   vacated(bayId: string): unknown;
   held(bayId: string): boolean;
-  carSeen(bayId: string): void;
+  carSeen(bayId: string, plate: unknown): void;
 };
 
 const FRESH_MS = 2 * 60_000; // a plate read counts for the car that pulls in within 2 min
@@ -44,7 +44,7 @@ export function createBridge(
     if (e.lockId !== lockId) return queue;
     if (e.type === 'photo') {
       seen = { plate: e.plate, at: now() };
-      engine.carSeen(bayId);
+      engine.carSeen(bayId, e.plate); // walk-up needs the read plate to be one of the driver's cars
       // a held bay: decide now, the arm is up and the car can't pull in before check-in
       if (presence === 'occupied' || engine.held(bayId)) return arrive(e.plate);
     } else if (e.type === 'presence') {

@@ -101,7 +101,9 @@ export function BookingView() {
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <p className="font-mono text-xs font-medium uppercase tracking-[0.12em] text-muted">Your booking</p>
-          <h1 className="mt-1 font-display text-4xl leading-[0.95] tracking-[0.012em]">{state.bay.name}</h1>
+          <h1 className="mt-1 font-display text-4xl leading-[0.95] tracking-[0.012em]">
+            {state.viewer?.active?.bayName ?? state.viewer?.next?.bayName ?? state.bay.name}
+          </h1>
           <p className="text-muted">
             {state.bay.address} · {state.bay.powerKw} kW
           </p>

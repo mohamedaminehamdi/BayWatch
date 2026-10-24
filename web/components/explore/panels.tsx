@@ -1,12 +1,14 @@
 'use client';
 
-import { ArrowLeft, BellRing, Clock, ExternalLink, Navigation, ShieldCheck, TriangleAlert, WifiOff, Zap } from 'lucide-react';
+import { ArrowLeft, BellRing, CarFront, Clock, ExternalLink, Navigation, ShieldCheck, TriangleAlert, WifiOff, Zap } from 'lucide-react';
 import Link from 'next/link';
 import { useState } from 'react';
 import { api } from '@/components/api';
 import { useAppState } from '@/components/app/app-state';
 import { formatCountdown, formatTime, useNow } from '@/components/time';
 import { Button, buttonClass, chipClass } from '@/components/ui/button';
+import { Led } from '@/components/ui/led';
+import type { Bay } from '@/lib/booking-types';
 import { directionsUrl, formatDistance } from '@/lib/geo';
 import type { Charger } from '@/lib/goingelectric';
 import { formatEuro, FREE_CANCEL_MIN } from '@/lib/pricing';
@@ -41,43 +43,63 @@ const AVAILABILITY = {
   held: { label: 'Held for a waiting driver', tone: 'bg-warn-tint text-warn' },
 };
 
+// The three Baywatch bays say honestly whether a real barrier stands behind them
+export const hardwareNote = (b: Bay) => (b.guard === 'hardware' ? 'Real barrier' : b.real ? 'No hardware assigned yet' : 'Demo: simulated guard');
+// What a Baywatch bay is doing, in words: the LED is never the only sign
+const BAY_STATUS = {
+  free: { label: 'Free', tone: 'bg-brand-tint text-brand-strong' },
+  reserved: { label: 'Reserved', tone: 'bg-warn-tint text-warn' },
+  occupied: { label: 'Car in bay', tone: 'bg-warn-tint text-warn' },
+  offline: { label: 'Offline', tone: 'bg-warn-tint text-warn' },
+} as const;
+
 export function ChargerList({
-  state,
-  bayDistance,
+  realBays,
+  mineId,
   fromYou,
   rows,
   more,
   note,
   onSelectBay,
+  onBook,
   onSelect,
 }: {
-  state: AppState;
-  bayDistance: number | null;
+  realBays: Bay[];
+  mineId: string | null;
   fromYou: boolean;
   rows: Row[];
   more: boolean;
   note: string;
-  onSelectBay: () => void;
+  onSelectBay: (id: string) => void;
+  onBook: (id: string) => void;
   onSelect: (id: number) => void;
 }) {
-  const offline = bayOffline(state);
-  const a = AVAILABILITY[bayAvailability(state)];
   return (
     <div>
-      <button type="button" onClick={onSelectBay} className="group flex w-full items-center gap-4 rounded-2xl bg-brand-deep p-4 text-left text-on-brand">
-        <span className="grid size-11 shrink-0 place-items-center rounded-full bg-signal text-ink">
-          <Zap className="size-5 fill-current" />
-        </span>
-        <span className="min-w-0 flex-1">
-          <span className="block truncate font-display text-2xl leading-none tracking-[0.012em]">{state.bay.name}</span>
-          <span className="mt-1.5 block font-mono text-xs uppercase tracking-[0.08em] text-on-brand-muted">
-            {state.bay.powerKw} kW · {offline ? 'Offline' : a.label}
-            {!offline && bayAvailability(state) === 'free' && ` · ${formatEuro(state.quote.cents)}`}
-            {bayDistance !== null && ` · ${formatDistance(bayDistance)}`}
-          </span>
-        </span>
-        <span className="font-mono text-xs font-semibold uppercase tracking-[0.1em] text-signal">View →</span>
-      </button>
+      <h2 className="font-mono text-xs font-medium uppercase tracking-[0.12em] text-muted">Demo bays</h2>
+      <ul className="mt-3 grid gap-2.5">
+        {realBays.map((b) => (
+          <li key={b.id} className="flex items-center gap-3 rounded-2xl bg-brand-deep p-3 pl-4 text-on-brand">
+            <button type="button" onClick={() => onSelectBay(b.id)} className="flex min-h-11 min-w-0 flex-1 items-center gap-3 rounded-xl text-left">
+              <span className="grid size-11 shrink-0 place-items-center rounded-full bg-accent text-surface">
+                <Zap aria-hidden className="size-5 fill-current" />
+              </span>
+              <span className="min-w-0">
+                <span className="block truncate font-display text-2xl leading-none tracking-[0.012em]">{b.name}</span>
+                <span className="mt-1.5 flex items-center gap-2 font-mono text-xs uppercase tracking-[0.08em] text-on-brand-muted">
+                  {b.status !== 'offline' && <Led led={b.led} onDark />}
+                  {b.id === mineId ? 'Booked by you' : BAY_STATUS[b.status].label} · {b.powerKw} kW · from {formatEuro(b.priceFromCents)}
+                </span>
+                <span className="mt-1 block font-mono text-xs uppercase tracking-[0.08em] text-on-brand-accent">{hardwareNote(b)}</span>
+              </span>
+            </button>
+            <Button variant="signal" size="sm" disabled={b.status === 'offline'} onClick={() => onBook(b.id)} aria-label={`Book ${b.name} now`}>
+              Book now
+            </Button>
+          </li>
+        ))}
+        {!realBays.length && <li className="rounded-2xl bg-sunken px-4 py-3 text-sm text-muted">The demo bays aren’t reachable right now.</li>}
+      </ul>
 
       <h2 className="mt-6 flex items-baseline justify-between gap-3 text-sm text-muted">
         <span className="font-mono text-xs font-medium uppercase tracking-[0.12em]">Public chargers nearby</span>
@@ -174,6 +196,57 @@ export function ChargerDetail({
           </a>
         )}
       </div>
+    </div>
+  );
+}
+
+// One Baywatch bay: its status and LED, whether a real barrier stands behind it, Book now and Navigate by car
+export function RealBayDetail({ bay: b, mine, distance, onBack, onBook }: { bay: Bay; mine: boolean; distance: number | null; onBack: () => void; onBook: () => void }) {
+  const offline = b.status === 'offline';
+  const s = BAY_STATUS[b.status];
+  return (
+    <div>
+      <BackButton onBack={onBack} />
+      <span className={`${chipClass} ${s.tone}`}>
+        {!offline && <Led led={b.led} />}
+        {s.label} · {hardwareNote(b)}
+      </span>
+      <h2 className="mt-3 font-display text-4xl leading-[0.95] tracking-[0.012em]">{b.name}</h2>
+      <p className="mt-1 text-muted">
+        {b.address} · {b.powerKw} kW
+        {distance !== null && ` · ${formatDistance(distance)} away`}
+      </p>
+      {offline && (
+        <p role="status" className="mt-4 flex gap-3 rounded-2xl bg-warn-tint p-4 font-semibold text-ink">
+          <WifiOff aria-hidden className="mt-0.5 size-5 shrink-0 text-warn" />
+          {OFFLINE_TEXT}
+        </p>
+      )}
+      {b.status === 'occupied' && !mine && (
+        <p role="status" className="mt-4 flex gap-3 rounded-2xl bg-warn-tint p-4 text-ink">
+          <CarFront aria-hidden className="mt-0.5 size-5 shrink-0 text-warn" />
+          <span>
+            <span className="font-semibold">A car is in the bay right now,</span> so it can’t be booked for now. Try another Baywatch bay.
+          </span>
+        </p>
+      )}
+      {mine ? (
+        <Link href="/booking" className={buttonClass('primary', 'lg', 'mt-5')}>
+          Open your booking
+        </Link>
+      ) : (
+        <div className="mt-5 flex flex-wrap gap-3">
+          <Button size="lg" disabled={offline} onClick={onBook}>
+            Book now · from {formatEuro(b.priceFromCents)}
+          </Button>
+          <a href={directionsUrl(b)} target="_blank" rel="noopener" className={buttonClass('secondary', 'lg')}>
+            <Navigation aria-hidden className="size-5" /> Navigate by car
+          </a>
+        </div>
+      )}
+      <p className="mt-5 text-sm text-muted">
+        {b.guard === 'hardware' ? 'Booking it raises the real barrier at the bay.' : 'No hardware is assigned to this bay yet, so its guard is simulated.'}
+      </p>
     </div>
   );
 }

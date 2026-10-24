@@ -9,14 +9,14 @@ import { api } from '@/components/api';
 import { useAppState } from '@/components/app/app-state';
 import { distanceM, type Point } from '@/lib/geo';
 import type { Charger } from '@/lib/goingelectric';
-import type { BayLook, View } from './map-view';
-import { BayDetail, bayAvailability, bayOffline, ChargerDetail, ChargerList, type Row } from './panels';
+import type { View } from './map-view';
+import { ChargerDetail, ChargerList, RealBayDetail, type Row } from './panels';
 import { ReserveDialog } from './reserve-dialog';
 
 const MapView = dynamic(() => import('./map-view'), { ssr: false, loading: () => <div className="absolute inset-0 animate-pulse bg-sunken" /> });
 
 type Found = { chargers: Charger[]; warning?: string; more?: boolean };
-type Selection = { kind: 'bay' } | { kind: 'charger'; id: number } | null;
+type Selection = { kind: 'bay'; id: string } | { kind: 'charger'; id: number } | null;
 
 const MIN_ZOOM = 10.5; // wider than this, GoingElectric would return a whole region
 const LIST_CAP = 50;
@@ -35,9 +35,10 @@ export function Explore() {
   const [fast, setFast] = useState(false);
   const [reservableOnly, setReservableOnly] = useState(false);
   const [me, setMe] = useState<Point | null>(null);
-  const [selected, setSelected] = useState<Selection>(params.has('bay') ? { kind: 'bay' } : null);
+  const [selected, setSelected] = useState<Selection>(params.has('bay') ? { kind: 'bay', id: params.get('bay') ?? '' } : null);
   const [sheetOpen, setSheetOpen] = useState(params.has('bay'));
-  const [reserveOpen, setReserveOpen] = useState(params.get('reserve') === '1'); // partner deep links: /explore?bay=…&reserve=1
+  // the Baywatch bay being booked; partner deep links: /explore?bay=…&reserve=1
+  const [reserveFor, setReserveFor] = useState<string | null>(params.get('reserve') === '1' ? (params.get('bay') ?? '') : null);
   const [query, setQuery] = useState('');
   const [searchNote, setSearchNote] = useState('');
 
@@ -74,11 +75,13 @@ export function Explore() {
 
   if (!state) return <div className="absolute inset-0 animate-pulse bg-sunken" />;
 
-  const bay = state.bay;
-  const bayDistance = from ? distanceM(from, bay) : null;
-  const availability = bayAvailability(state);
-  // a booked driver keeps their pin; otherwise an offline device greys it out, whatever the bay's own state
-  const bayLook: BayLook = availability === 'mine' ? 'mine' : bayOffline(state) ? 'offline' : availability === 'free' ? 'free' : 'busy';
+  // the three Baywatch bays, live with every /api/state poll; an unknown id (an old link) means the first one
+  const realBays = state.realBays ?? [];
+  const bayById = (id: string | null) => (id === null ? undefined : (realBays.find((b) => b.id === id) ?? realBays[0]));
+  const selectedBay = selected?.kind === 'bay' ? bayById(selected.id) : undefined;
+  const reserveBay = bayById(reserveFor) ?? null;
+  const mineId = state.viewer?.active?.bayId ?? state.viewer?.next?.bayId ?? null;
+  const center = realBays[0] ?? state.bay;
   const charger = selected?.kind === 'charger' ? visible.find((c) => c.id === selected.id) : undefined;
 
   const zoomNote = view && view.zoom < MIN_ZOOM ? 'Zoom in to see public chargers.' : '';
@@ -91,7 +94,7 @@ export function Explore() {
   function select(next: Selection) {
     setSelected(next);
     setSheetOpen(true);
-    const target = next?.kind === 'bay' ? bay : next?.kind === 'charger' ? visible.find((c) => c.id === next.id) : null;
+    const target = next?.kind === 'bay' ? bayById(next.id) : next?.kind === 'charger' ? visible.find((c) => c.id === next.id) : null;
     if (target) fly(target, Math.max(view?.zoom ?? 14.5, 14.5));
   }
 
@@ -173,30 +176,38 @@ export function Explore() {
   );
 
   const panel =
-    selected?.kind === 'bay' ? (
+    selectedBay ? (
       // details only show distance from you: the map re-centres on what you picked, so a centre distance means nothing
-      <BayDetail state={state} distance={me ? distanceM(me, bay) : null} onBack={() => setSelected(null)} onReserve={() => setReserveOpen(true)} />
+      <RealBayDetail
+        bay={selectedBay}
+        mine={selectedBay.id === mineId}
+        distance={me ? distanceM(me, selectedBay) : null}
+        onBack={() => setSelected(null)}
+        onBook={() => setReserveFor(selectedBay.id)}
+      />
     ) : charger ? (
       <ChargerDetail
         charger={charger}
         distance={me ? distanceM(me, charger) : null}
         onBack={() => setSelected(null)}
         onBook={() => {
-          setSelected({ kind: 'bay' });
+          if (!realBays[0]) return;
+          setSelected({ kind: 'bay', id: realBays[0].id });
           setSheetOpen(true);
-          fly(bay, 15);
-          setReserveOpen(true);
+          fly(realBays[0], 15);
+          setReserveFor(realBays[0].id);
         }}
       />
     ) : (
       <ChargerList
-        state={state}
-        bayDistance={me || (bayDistance ?? 0) > 100 ? bayDistance : null}
+        realBays={realBays}
+        mineId={mineId}
         fromYou={!!me}
         rows={rows}
         more={visible.length > LIST_CAP}
         note={note}
-        onSelectBay={() => select({ kind: 'bay' })}
+        onSelectBay={(id) => select({ kind: 'bay', id })}
+        onBook={setReserveFor}
         onSelect={(id) => select({ kind: 'charger', id })}
       />
     );
@@ -211,17 +222,19 @@ export function Explore() {
       <div className="relative h-full flex-1 max-lg:[&_.maplibregl-ctrl-group]:hidden">
         <MapView
           chargers={visible}
-          bay={bay}
-          bayLook={bayLook}
+          realBays={realBays}
+          center={center}
+          mineId={mineId}
+          selectedBayId={selectedBay?.id ?? null}
           selectedId={charger?.id ?? null}
           me={me}
           onReady={(m) => {
             map.current = m;
-            if (selected?.kind === 'bay') fly(bay, 15);
+            if (selectedBay) fly(selectedBay, 15);
           }}
           onView={setView}
           onSelectCharger={(id) => select({ kind: 'charger', id })}
-          onSelectBay={() => select({ kind: 'bay' })}
+          onSelectBay={(id) => select({ kind: 'bay', id })}
         />
         <div className="absolute inset-x-3 top-3 z-(--z-map-ui) lg:hidden">{controls}</div>
 
@@ -247,7 +260,7 @@ export function Explore() {
         </section>
       </div>
 
-      <ReserveDialog open={reserveOpen} onClose={() => setReserveOpen(false)} />
+      <ReserveDialog bay={reserveBay} open={!!reserveBay} onClose={() => setReserveFor(null)} />
     </div>
   );
 }

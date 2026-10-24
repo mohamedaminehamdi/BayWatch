@@ -47,7 +47,7 @@ export function Bookings() {
               {live.status === 'reserved' && !live.blockedSince && ` · until ${formatTime(live.expiresAt)}`}
               {live.blockedSince && ' · bay blocked, hold paused'}
             </span>
-            <span className="text-sm text-on-brand-muted">{state?.bay.name}</span>
+            <span className="text-sm text-on-brand-muted">{state?.viewer?.active?.bayName ?? state?.viewer?.next?.bayName ?? state?.bay.name}</span>
           </span>
           <span className="font-mono text-xs font-semibold uppercase tracking-[0.1em] text-signal">Open →</span>
         </Link>
