@@ -42,13 +42,13 @@ test('demand from the local time: weekday evenings busy, nights quiet, holidays 
   assert.equal(demandAt(monday('03:00'), { override: 'full' }), 'full');
 });
 
-test('fee: €2.50 × class × demand, rounded down, never more than €4', () => {
+test('fee: €5 × class × demand, rounded down, never more than €10', () => {
   const fee = (c: 'slow' | 'fast' | 'ultra', d: 'quiet' | 'normal' | 'busy' | 'full') => bookingFee(c, d).cents;
-  assert.deepEqual([fee('slow', 'normal'), fee('fast', 'normal'), fee('ultra', 'normal')], [125, 250, 375]);
-  assert.deepEqual([fee('slow', 'quiet'), fee('fast', 'quiet'), fee('ultra', 'quiet')], [100, 200, 300]);
-  assert.deepEqual([fee('slow', 'busy'), fee('fast', 'busy'), fee('ultra', 'busy')], [187, 375, 400], 'ultra busy would be €5.62');
-  assert.deepEqual([fee('slow', 'full'), fee('fast', 'full'), fee('ultra', 'full')], [250, 400, 400]);
-  assert.deepEqual(bookingFee('ultra', 'quiet'), { cents: 300, demand: 'Quiet', multiplier: 1.2 });
+  assert.deepEqual([fee('slow', 'normal'), fee('fast', 'normal'), fee('ultra', 'normal')], [250, 500, 750]);
+  assert.deepEqual([fee('slow', 'quiet'), fee('fast', 'quiet'), fee('ultra', 'quiet')], [200, 400, 600]);
+  assert.deepEqual([fee('slow', 'busy'), fee('fast', 'busy'), fee('ultra', 'busy')], [375, 750, 1000], 'ultra busy would be €11.25');
+  assert.deepEqual([fee('slow', 'full'), fee('fast', 'full'), fee('ultra', 'full')], [500, 1000, 1000]);
+  assert.deepEqual(bookingFee('ultra', 'quiet'), { cents: 600, demand: 'Quiet', multiplier: 1.2 });
 });
 
 test('the grid: quarter-hour starts, the current block for its first 5 min, whole blocks up to the class maximum, 60 days ahead', () => {
@@ -103,24 +103,24 @@ test('cancellation by time before the start, at each tier boundary', () => {
   const late = start - 3 * MIN; // booked 3 min before the start
   assert.equal(cancelPercent({ bookedAt: late, start, at: late + 2 * MIN }), 0, 'within 2 min of booking');
   assert.equal(cancelPercent({ bookedAt: late, start, at: late + 2 * MIN + 1 }), 80);
-  assert.equal(cancelCents(250, { bookedAt, start, at: start - 10 * MIN }), 125);
-  assert.equal(cancelCents(375, { bookedAt, start, at: start - H }), 37, '10% of €3.75, rounded down');
-  assert.equal(noShowCents(250), 250, 'a no-show costs the whole fee');
+  assert.equal(cancelCents(500, { bookedAt, start, at: start - 10 * MIN }), 250);
+  assert.equal(cancelCents(375, { bookedAt, start, at: start - H }), 37, '10% of €3.75 (slow, busy), rounded down');
+  assert.equal(noShowCents(500), 500, 'a no-show costs the whole fee');
 });
 
 test('the cancellation schedule a driver sees before booking', () => {
   const start = at('2026-10-30T15:00:00+01:00');
-  const two = cancelSchedule(250, start - 2 * DAY, start);
+  const two = cancelSchedule(500, start - 2 * DAY, start);
   assert.deepEqual(
     two.map((s) => [s.from - start, s.percent, s.cents]),
     [
       [-2 * DAY, 0, 0],
-      [-DAY + 1, 10, 25],
-      [-30 * MIN + 1, 50, 125],
-      [-5 * MIN + 1, 80, 200],
+      [-DAY + 1, 10, 50],
+      [-30 * MIN + 1, 50, 250],
+      [-5 * MIN + 1, 80, 400],
     ],
   );
-  const soon = cancelSchedule(250, start - 10 * MIN, start);
+  const soon = cancelSchedule(500, start - 10 * MIN, start);
   assert.deepEqual(
     soon.map((s) => [s.from - start, s.percent]),
     [
@@ -129,7 +129,7 @@ test('the cancellation schedule a driver sees before booking', () => {
       [-5 * MIN + 1, 80],
     ],
   );
-  assert.deepEqual(cancelSchedule(250, start, start).map((s) => s.percent), [0, 80], 'booked as the slot starts');
+  assert.deepEqual(cancelSchedule(500, start, start).map((s) => s.percent), [0, 80], 'booked as the slot starts');
 });
 
 test('overstay: 5 free minutes after the end, then €0.30 a started minute, at most €12', () => {

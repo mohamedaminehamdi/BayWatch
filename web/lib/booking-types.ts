@@ -154,8 +154,9 @@ export interface BookingsResponse extends Wallet {
 }
 export interface ReserveRequest {
   bayId: string;
-  start: number;
-  blocks: number;
+  start?: number; // both unused with `now`
+  blocks?: number;
+  now?: true; // "Book now": this moment, from the block under way for at least an hour (the server sets the slot)
   vehicleId: string;
   priceCents: number; // Quote.cents the driver saw: a different price now is a 409
   acceptFees: true;

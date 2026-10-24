@@ -36,6 +36,10 @@ test('toEvent: the names the server really sends, the documented ones, and raw d
   assert.deepEqual(ev('lock:photo_captured', { type: 'lock:photo_captured', lockId: id, licensePlate: 'M-AB 1234' }), { type: 'photo', lockId: id, plate: 'M-AB 1234' });
   assert.deepEqual(ev('photo_captured', { lockId: id, licensePlate: '' }), { type: 'photo', lockId: id, plate: '' }, 'unreadable plate');
   assert.deepEqual(ev('lock:car_presence', { lockId: id, presence: 'occupied' }), { type: 'presence', lockId: id, presence: 'occupied' });
+  // the live server's real name (2026-10-24), with a name or the raw code
+  assert.deepEqual(ev('lock:car_presence_changed', { lockId: id, presence: 'vacant' }), { type: 'presence', lockId: id, presence: 'vacant' });
+  assert.deepEqual(ev('lock:car_presence_changed', { lockId: id, carPresenceRaw: 1 }), { type: 'presence', lockId: id, presence: 'occupied' });
+  assert.deepEqual(ev('lock:status_changed', { lockId: id, status: 'lowered' }), { type: 'arm', lockId: id, arm: 'lowered' });
   assert.deepEqual(ev('vehicle_presence', { lockId: id, presence: 'vacant' }), { type: 'presence', lockId: id, presence: 'vacant' });
   assert.deepEqual(ev('message', { type: 'lock:car_presence', lockId: id, carPresence: 1 }), { type: 'presence', lockId: id, presence: 'occupied' });
   assert.deepEqual(ev('lock:status_change', { lockId: id, status: 'lowered' }), { type: 'arm', lockId: id, arm: 'lowered' });

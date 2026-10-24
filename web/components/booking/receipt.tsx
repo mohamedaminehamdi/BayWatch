@@ -1,7 +1,7 @@
-import type { Charge } from '@/lib/pricing';
+import type { Charge } from '@/lib/booking-types';
 import { formatEuro } from '@/lib/pricing';
 
-// The booking's charges are its receipt
+// The booking's charges are its receipt: the fee, credit used, refunds, what came back, idle time
 export function Receipt({ charges, totalCents }: { charges: Charge[]; totalCents: number }) {
   return (
     <div>

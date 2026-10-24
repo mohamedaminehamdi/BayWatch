@@ -93,6 +93,7 @@ test('status: the real fields, no plates, and one hardware read for many polls',
     online: true,
     carPresence: 'vacant',
     autoUnlock: 'any',
+    listOk: null,
     battery12V: 15.1,
     battery3_7V: 0,
     signalStrength4G: 0,
@@ -169,45 +170,48 @@ test('raise never puts the arm up onto a car or on an offline lock', async () =>
   assert.deepEqual(posts(calls), []);
 });
 
-test('raise puts the arm up and stops the camera lowering it for any car; lower takes it down for good', async () => {
+test('raise puts the arm up with the booked plate on the camera’s list; lower takes it down for good and empties the list', async () => {
   const calls = fake({ 'lock-0002': { ...lock2(), status: 'lowered' }, 'lock-0003': lock3() });
-  await hw.raise('lock-0002', ['MAB1234']);
+  assert.deepEqual(await hw.raise('lock-0002', ['m-ab 1234', 'B XY 123']), { autoUnlock: 'camera' }, 'the camera echoed both plates');
   assert.equal((await hw.status('lock-0002')).state, 'blocked');
   await hw.lower('lock-0002');
   assert.equal((await hw.status('lock-0002')).state, 'free');
-  await hw.raise('lock-0002');
+  assert.deepEqual(await hw.raise('lock-0002'), { autoUnlock: 'app' }, 'no plates: nobody gets in by the camera');
   await hw.raise('lock-0002');
   assert.deepEqual(posts(calls), [
     ['/locks/lock-0002/lock', { cancelAutoLift: true }],
-    ['/locks/lock-0002/whitelist', { plates: [] }], // ['*'] goes: no car lowers the arm by itself
+    ['/locks/lock-0002/whitelist', { plates: ['MAB1234', 'BXY123'] }], // normalised like the app's own matcher
     ['/locks/lock-0002/unlock', { cancelAutoLift: true }], // stays down, under the car
-    ['/locks/lock-0002/lock', { cancelAutoLift: true }], // up again once the car has left
+    ['/locks/lock-0002/whitelist', { plates: [] }], // the plate can't open the bay outside its slot
+    ['/locks/lock-0002/lock', { cancelAutoLift: true }], // up again once the car has left; the list is already empty
   ], 'an arm already up gets no second command');
+  assert.ok(
+    calls.filter((c) => c.path.endsWith('/whitelist')).every((c) => Object.keys(c.body!).join() === 'plates'),
+    'only ever { plates }: never { wildcard: true }',
+  );
 
-  // ECURIOUS_WHITELIST=1: the camera lowers the arm itself for the booked car only, until the session
-  process.env.ECURIOUS_WHITELIST = '1';
+  // ECURIOUS_WHITELIST=0: the camera lowers the arm for nobody, the app's own match does it
+  process.env.ECURIOUS_WHITELIST = '0';
   calls.length = 0;
   await hw.lower('lock-0002');
-  await hw.raise('lock-0002', ['MAB1234']);
-  await hw.setPlates('lock-0002', []);
+  assert.deepEqual(await hw.raise('lock-0002', ['MAB1234']), { autoUnlock: 'app' });
   assert.deepEqual(posts(calls), [
     ['/locks/lock-0002/unlock', { cancelAutoLift: true }],
     ['/locks/lock-0002/lock', { cancelAutoLift: true }],
-    ['/locks/lock-0002/whitelist', { plates: ['MAB1234'] }],
-    ['/locks/lock-0002/whitelist', { plates: [] }],
   ]);
 });
 
-test('a camera list that fails or drops the plate does not fail the booking, and shows in status', async (t) => {
+test('a camera list that fails or drops the plate does not fail the booking: the app’s match takes over, and status shows it', async (t) => {
   const warn = t.mock.method(console, 'warn', () => {});
-  process.env.ECURIOUS_WHITELIST = '1';
   // the second spec example: the camera kept only plates with a Chinese province prefix
   fake({ 'lock-0002': { ...lock2(), status: 'lowered' }, 'lock-0003': lock3() }, (c) =>
-    c.path.endsWith('/whitelist') ? Response.json({ success: true, whitelist: [] }) : undefined,
+    c.path.endsWith('/whitelist') ? Response.json({ success: true, message: 'Configured whitelist rules on lock.', whitelist: [] }) : undefined,
   );
-  await hw.raise('lock-0002', ['MAB1234']);
+  assert.deepEqual(await hw.raise('lock-0002', ['MAB1234']), { autoUnlock: 'app' });
   assert.equal((await hw.status('lock-0002')).autoUnlock, 'off');
-  assert.match(String(warn.mock.calls.at(-1)?.arguments[0]), /did not store every plate/);
+  const said = String(warn.mock.calls.at(-1)?.arguments[0]);
+  assert.match(said, /did not store the booked plate/);
+  assert.ok(!said.includes('MAB1234'), 'no plate in the log');
 });
 
 test('after a failed command, that lock refuses new ones for 30 s without reaching the hardware; other locks carry on', async () => {
@@ -228,13 +232,22 @@ test("only the team's own locks: lock-0001 is refused before any call to it", as
   assert.deepEqual(await hw.teamLocks(), ['lock-0002', 'lock-0003']);
 });
 
-test("the CLI's lock: ECURIOUS_LOCK_ID, or the team's first, with a warning", async (t) => {
-  const warn = t.mock.method(console, 'warn', () => {});
+test("the CLI's lock: exactly ECURIOUS_LOCK_ID, one of the team's own, and no fallback", async () => {
   fake();
-  assert.equal(await hw.lockId(), 'lock-0002');
-  assert.match(String(warn.mock.calls[0].arguments[0]), /first bay, lock-0002/);
+  await assert.rejects(hw.lockId(), /Set ECURIOUS_LOCK_ID/);
+  process.env.ECURIOUS_LOCK_ID = 'lock-0003';
+  assert.equal(await hw.lockId(), 'lock-0003');
   process.env.ECURIOUS_LOCK_ID = 'lock-0001';
   await assert.rejects(hw.lockId(), /not one of this team's bays/);
+  delete process.env.ECURIOUS_LOCK_ID;
+  assert.equal((await hw.status()).state, 'unknown', 'a caller that names no lock gets none');
+});
+
+test('the server’s team list decides: lock-0001 is used once it is listed again (it came back at 16:30)', async () => {
+  const calls = fake({ 'lock-0001': { ...lock2(), id: 'lock-0001' }, 'lock-0002': lock2() });
+  assert.deepEqual(await hw.teamLocks(), ['lock-0001', 'lock-0002']);
+  await hw.lower('lock-0001');
+  assert.ok(calls.some((c) => c.path === '/locks/lock-0001/unlock'));
 });
 
 test('events keep each lock’s cached status current between reads', async () => {

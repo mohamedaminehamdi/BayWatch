@@ -8,7 +8,7 @@ const CARL = 'user_carl';
 const MIN = 60_000;
 const BAY = { lat: 52.52, lng: 13.405 };
 
-// A fast (DC) bay at normal demand: €2.50, a 15-min arrival grace
+// A fast (DC) bay at normal demand: €5, a 15-min arrival grace
 function setup() {
   let t = 1_000_000;
   const calls: string[] = [];
@@ -27,7 +27,7 @@ test('full cycle: reserve → plate check-in → charge → release', async () =
   const { r, calls, book } = setup();
   await book(ANNA, 'm-ab 1234');
   await assert.rejects(book(BEN, 'B XY 1'), { status: 409 });
-  assert.equal(r.state(ANNA).reservation?.totalCents, 250, 'fast at normal demand: €2.50');
+  assert.equal(r.state(ANNA).reservation?.totalCents, 500, 'fast at normal demand: €5');
 
   assert.deepEqual(await r.plateEvent('MAB1234'), { matched: true, matchedBy: 'exact' });
   assert.deepEqual(calls, ['reserve', 'release']);
@@ -38,7 +38,7 @@ test('full cycle: reserve → plate check-in → charge → release', async () =
   r.finish(ANNA);
   const { reservation, log } = r.state(ANNA);
   assert.equal(reservation?.status, 'completed');
-  assert.equal(reservation?.totalCents, 250, 'no overstay inside the session');
+  assert.equal(reservation?.totalCents, 500, 'no overstay inside the session');
   assert.equal(reservation?.plateHint, null, 'plate is erased after the session');
   assert.ok(!JSON.stringify(log).includes('MAB1234'), 'log never contains plates');
   assert.equal(r.state(BEN).reservation, null, "others don't see someone else's ended session");
@@ -57,18 +57,18 @@ test('other drivers see the bay as busy and until when, but not whose car it is'
   assert.ok(!json.includes(ANNA) && !json.includes('MAB1234') && !json.includes('Blue Zoe'), 'public state leaks nothing personal');
 });
 
-test('the fee follows site demand, is capped at €4, and is fixed once the driver has seen it', async () => {
+test('the fee follows site demand, is capped at €10, and is fixed once the driver has seen it', async () => {
   const { r } = setup();
-  assert.deepEqual([r.quote(null).cents, r.quote(null).demand], [250, 'Normal'], 'no demand data yet: normal');
+  assert.deepEqual([r.quote(null).cents, r.quote(null).demand], [500, 'Normal'], 'no demand data yet: normal');
   r.setOccupancy(0.15);
-  assert.deepEqual([r.quote(null).cents, r.quote(null).demand], [200, 'Quiet']);
+  assert.deepEqual([r.quote(null).cents, r.quote(null).demand], [400, 'Quiet']);
   r.setOccupancy(0.95);
-  assert.deepEqual([r.quote(null).cents, r.quote(null).demand], [400, 'Peak'], '2x would be €5, capped at €4');
-  await assert.rejects(r.reserve(ANNA, 'MAB1234', 'Car', 60 * MIN, 250), { status: 409 }, 'the price moved since the driver looked');
-  const booked = await r.reserve(ANNA, 'MAB1234', 'Car', 60 * MIN, 400);
-  assert.deepEqual([booked.feeCents, booked.demand, booked.totalCents], [400, 'Peak', 400]);
+  assert.deepEqual([r.quote(null).cents, r.quote(null).demand], [1000, 'Peak'], '2×: the €10 cap');
+  await assert.rejects(r.reserve(ANNA, 'MAB1234', 'Car', 60 * MIN, 500), { status: 409 }, 'the price moved since the driver looked');
+  const booked = await r.reserve(ANNA, 'MAB1234', 'Car', 60 * MIN, 1000);
+  assert.deepEqual([booked.feeCents, booked.demand, booked.totalCents], [1000, 'Peak', 1000]);
   r.setOccupancy(0.15);
-  assert.equal(r.state(ANNA).reservation?.feeCents, 400, 'a later price change does not touch the booking');
+  assert.equal(r.state(ANNA).reservation?.feeCents, 1000, 'a later price change does not touch the booking');
 });
 
 test('sessions start now and last at most 2 h on a fast bay', async () => {
@@ -85,7 +85,7 @@ test('running late: one +5 min extension for €0.50 moves the arrival deadline'
   const { expiresAt } = await book();
   const extended = r.extend(ANNA);
   assert.equal(extended.expiresAt, expiresAt + 5 * MIN);
-  assert.equal(extended.totalCents, 300);
+  assert.equal(extended.totalCents, 550);
   assert.throws(() => r.extend(ANNA), { status: 409 }, 'only once');
   assert.throws(() => r.extend(BEN), { status: 403 });
 });
@@ -98,7 +98,7 @@ test('no-show: 15 min of grace, then the bay is released and half the fee comes 
   await advance(1);
   const ns = r.state(ANNA).reservation;
   assert.equal(ns?.status, 'no_show');
-  assert.equal(ns?.totalCents, 125, '50% of €2.50');
+  assert.equal(ns?.totalCents, 250, '50% of €5');
   assert.equal(ns?.charges?.at(-1)?.kind, 'released');
   assert.deepEqual(calls, ['reserve', 'release']);
   assert.deepEqual(await r.plateEvent('MAB1234'), { matched: false }, 'late arrival no longer opens the bay');
@@ -118,12 +118,12 @@ test('repeat no-shows: a warning at 2, prepaying at 3, and a prepaid no-show kee
   await noShow();
   const q = r.quote(ANNA);
   assert.equal(q.prepaid, true);
-  assert.equal(q.noShowCents, 250, 'prepaid: nothing back on a no-show');
+  assert.equal(q.noShowCents, 500, 'prepaid: nothing back on a no-show');
   assert.equal(r.quote(BEN).prepaid, false, 'only the driver who missed');
   const prepaid = await book();
   assert.equal(prepaid.prepaid, true);
   await advance(16 * MIN);
-  assert.equal(r.state(ANNA).reservation?.totalCents, 250, 'whole fee kept');
+  assert.equal(r.state(ANNA).reservation?.totalCents, 500, 'whole fee kept');
 });
 
 test('cancelling: free in the first 2 min or while the bay is blocked, then 60% of the no-show fee', async () => {
@@ -138,14 +138,14 @@ test('cancelling: free in the first 2 min or while the bay is blocked, then 60% 
   await late.book();
   await late.advance(2 * MIN + 1);
   const paid = await late.r.cancel(ANNA);
-  assert.equal(paid.totalCents, 75, '60% of the €1.25 no-show fee: the session had already started');
+  assert.equal(paid.totalCents, 150, '60% of the €2.50 no-show fee: the session had already started');
   assert.equal(paid.charges?.at(-1)?.kind, 'released');
 
   const extended = setup();
   await extended.book();
   extended.r.extend(ANNA);
   await extended.advance(5 * MIN);
-  assert.equal((await extended.r.cancel(ANNA)).totalCents, 75, 'the extension comes back too');
+  assert.equal((await extended.r.cancel(ANNA)).totalCents, 150, 'the extension comes back too');
 
   const blocked = setup();
   await blocked.book();
@@ -160,7 +160,7 @@ test('overstay: 15 min after the session ends are free, then €0.25 a started m
   await r.plateEvent('MAB1234');
   r.startCharging(ANNA);
   await advance(30 * MIN + 15 * MIN);
-  assert.equal(r.finish(ANNA).totalCents, 250, 'inside the grace');
+  assert.equal(r.finish(ANNA).totalCents, 500, 'inside the grace');
 
   await book(ANNA, 'MAB1234', 30);
   await r.plateEvent('MAB1234');
@@ -169,7 +169,7 @@ test('overstay: 15 min after the session ends are free, then €0.25 a started m
   const out = r.state(ANNA).reservation;
   assert.equal(out?.status, 'completed', 'the car driving out ends the session');
   assert.equal(out?.charges?.at(-1)?.kind, 'overstay');
-  assert.equal(out?.totalCents, 250 + 5 * 25);
+  assert.equal(out?.totalCents, 500 + 5 * 25);
 });
 
 test('end-of-session reminders: 1 h and 15 min before the end, only once the car is in the bay', async () => {
@@ -229,7 +229,7 @@ test('the car leaving ends the session with no plate needed, or clears a car blo
   r.vacated();
   const done = r.state(ANNA).reservation;
   assert.equal(done?.status, 'completed');
-  assert.equal(done?.totalCents, 250 + 5 * 25, 'overstay billed: 5 min past the 15-min grace');
+  assert.equal(done?.totalCents, 500 + 5 * 25, 'overstay billed: 5 min past the 15-min grace');
 
   const blocked = setup();
   const { expiresAt } = await blocked.book();

@@ -1,20 +1,20 @@
 'use client';
 
 import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from 'react';
-import type { AppState } from '@/lib/server';
+import type { StateResponse } from '@/lib/booking-types';
 import { api } from '../api';
 
-type Ctx = { state: AppState | null; error: string; refresh: () => Promise<void> };
+type Ctx = { state: StateResponse | null; error: string; refresh: () => Promise<void> };
 const AppStateContext = createContext<Ctx>({ state: null, error: '', refresh: async () => {} });
 
 // One poll of /api/state for the whole app shell, every 2 s while the tab is visible
 export function AppStateProvider({ children }: { children: ReactNode }) {
-  const [state, setState] = useState<AppState | null>(null);
+  const [state, setState] = useState<StateResponse | null>(null);
   const [error, setError] = useState('');
 
   const refresh = useCallback(async () => {
     try {
-      setState(await api<AppState>('GET', '/api/state'));
+      setState(await api<StateResponse>('GET', '/api/state'));
       setError('');
     } catch (e) {
       setError((e as Error).message);

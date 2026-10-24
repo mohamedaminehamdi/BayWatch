@@ -270,9 +270,11 @@ export function createVoice({ service, now = Date.now }: { service: BookingServi
 
   async function attempt(q: Quote, call: Call, account: string) {
     if (now() > q.expiresAt) return { status: 'expired' as const, message: 'That quote has expired. Shall I check the time again?' };
+    const priceMoved = (cents: number) => ({ status: 'expired' as const, priceCents: cents, message: `The price is now ${spokenEuro(cents)}. Shall I quote it again?` });
+    const gone = (message?: string) => ({ status: 'unavailable' as const, message: message ?? 'That slot has just been taken.', alternatives: alternatives(q, service.bays(), account) });
     const current = service.quote(q.bay.id, q.start, q.blocks, account);
-    if (!current.valid) return { status: 'unavailable' as const, message: current.reason ?? 'That slot has just been taken.', alternatives: alternatives(q, service.bays(), account) };
-    if (current.cents !== q.priceCents) return { status: 'expired' as const, message: `The price is now ${spokenEuro(current.cents)}. Shall I quote it again?` };
+    if (!current.valid) return gone(current.reason);
+    if (current.cents !== q.priceCents) return priceMoved(current.cents);
     const car = await service.vehicle(account);
     if (!car) return NO_CAR;
     try {
@@ -280,8 +282,10 @@ export function createVoice({ service, now = Date.now }: { service: BookingServi
       return { status: 'confirmed' as const, bookingId: id, ...details(q, q.priceCents), confirmationText: `Booked: ${q.bay.name}, ${spokenWhen(q, call.at)}. It’s in your Baywatch app under Bookings.` };
     } catch (e) {
       const { status, message } = e as { status?: number; message?: string };
-      if (status === 409) return { status: 'unavailable' as const, message: message ?? 'That slot has just been taken.', alternatives: alternatives(q, service.bays(), account) };
-      return { status: 'error' as const, message: 'The booking didn’t go through. Please try again in the app.' };
+      if (status !== 409) return { status: 'error' as const, message: 'The booking didn’t go through. Please try again in the app.' };
+      // taken, the booking limit, or the price moved in the moment since the check above: ask the engine again
+      const again = service.quote(q.bay.id, q.start, q.blocks, account);
+      return again.valid && again.cents !== q.priceCents ? priceMoved(again.cents) : gone(again.reason ?? message);
     }
   }
 

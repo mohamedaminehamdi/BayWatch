@@ -17,11 +17,11 @@ export async function emailBlockedBay(since: number, bay: { name: string; addres
       method: 'POST',
       headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json' },
       body: JSON.stringify({
-        from: process.env.ALERT_FROM ?? 'Ecurious Reserve <onboarding@resend.dev>',
+        from: process.env.ALERT_FROM ?? 'Baywatch <onboarding@resend.dev>',
         to,
-        subject: `Blocked bay: ${bay.name}`,
+        subject: `Baywatch: ${bay.name} is blocked`,
         // no plate here: email is easy to forward, the plate stays in the operator dashboard
-        text: `A car without a booking has been standing in ${bay.name} (${bay.address}) since ${at}. The driver who reserved the bay is waiting, and their hold is paused.\n\nOpen the operator dashboard to see the details and resolve the alert.`,
+        text: `A car without a booking has been standing in ${bay.name} (${bay.address}) since ${at}. The driver who booked the bay is waiting: their arrival deadline waits, and they got a €5 credit.\n\nOpen the operator dashboard to see the details and resolve the alert.`,
       }),
       signal: AbortSignal.timeout(5_000),
     });

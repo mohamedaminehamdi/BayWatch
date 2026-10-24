@@ -8,7 +8,7 @@ export const POST = (req: Request) =>
   handle(async () => {
     await requireOperator();
     const input = await body(req);
-    const bay = await resolveBay(typeof input.bayId === 'string' ? input.bayId : 'bw-1');
+    const bay = await resolveBay(typeof input.bayId === 'string' ? input.bayId : fail(400, 'bayId is required: which bay’s arm to lower'));
     const lockId = bay.lockId ?? fail(409, `${bay.name} has no lock to lower`);
     try {
       await ecurious.lower(lockId);

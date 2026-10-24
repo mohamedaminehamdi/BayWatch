@@ -7,16 +7,15 @@ import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import type { MapRef } from 'react-map-gl/maplibre';
 import { api } from '@/components/api';
 import { useAppState } from '@/components/app/app-state';
+import { BookingFlow } from '@/components/booking/booking-flow';
+import type { Bay, BayDetail, BaysResponse } from '@/lib/booking-types';
 import { distanceM, type Point } from '@/lib/geo';
-import type { Charger } from '@/lib/goingelectric';
 import type { View } from './map-view';
-import { ChargerDetail, ChargerList, RealBayDetail, type Row } from './panels';
-import { ReserveDialog } from './reserve-dialog';
+import { BayList, BayPanel, type Row } from './panels';
 
 const MapView = dynamic(() => import('./map-view'), { ssr: false, loading: () => <div className="absolute inset-0 animate-pulse bg-sunken" /> });
 
-type Found = { chargers: Charger[]; warning?: string; more?: boolean };
-type Selection = { kind: 'bay'; id: string } | { kind: 'charger'; id: number } | null;
+type Found = BaysResponse & { warning?: string };
 
 const MIN_ZOOM = 10.5; // wider than this, GoingElectric would return a whole region
 const LIST_CAP = 50;
@@ -29,72 +28,88 @@ export function Explore() {
   const map = useRef<MapRef | null>(null);
   const cache = useRef(new Map<string, Found>());
 
+  // deep links: /explore?bay=<id> selects a bay, &reserve=1 opens booking (partner apps, the bay page)
+  const linked = params.get('bay') || null;
   const [view, setView] = useState<View | null>(null);
-  const [found, setFound] = useState<Found>({ chargers: [] });
+  const [found, setFound] = useState<Found>({ bays: [], realBays: [] });
   const [loadError, setLoadError] = useState('');
   const [fast, setFast] = useState(false);
-  const [reservableOnly, setReservableOnly] = useState(false);
+  const [freeNow, setFreeNow] = useState(false);
   const [me, setMe] = useState<Point | null>(null);
-  const [selected, setSelected] = useState<Selection>(params.has('bay') ? { kind: 'bay', id: params.get('bay') ?? '' } : null);
+  const [selectedId, setSelectedId] = useState<string | null>(linked);
+  const [extra, setExtra] = useState<Bay | null>(null); // a linked bay outside the current box
   const [sheetOpen, setSheetOpen] = useState(params.has('bay'));
-  // the Baywatch bay being booked; partner deep links: /explore?bay=…&reserve=1
-  const [reserveFor, setReserveFor] = useState<string | null>(params.get('reserve') === '1' ? (params.get('bay') ?? '') : null);
+  const [booking, setBooking] = useState<Bay | null>(null);
+  const [wantsBooking, setWantsBooking] = useState(params.get('reserve') === '1');
   const [query, setQuery] = useState('');
   const [searchNote, setSearchNote] = useState('');
 
-  // Load public chargers for the visible area: after the map settles, once per area (cached), never while zoomed far out
+  // GoingElectric bays for the visible area: after the map settles, once per area (cached), never zoomed far out
   useEffect(() => {
     if (!view || view.zoom < MIN_ZOOM) return;
     const [w, s, e, n] = view.bounds.map((v) => v.toFixed(3));
     const key = `${w},${s},${e},${n},${fast}`;
     const t = setTimeout(async () => {
       try {
-        const hit =
-          cache.current.get(key) ??
-          (await api<Found>('GET', `/api/chargers?sw_lat=${s}&sw_lng=${w}&ne_lat=${n}&ne_lng=${e}${fast ? '&min_power=50' : ''}`));
+        const hit = cache.current.get(key) ?? (await api<Found>('GET', `/api/bays?sw_lat=${s}&sw_lng=${w}&ne_lat=${n}&ne_lng=${e}${fast ? '&min_power=50' : ''}`));
         cache.current.set(key, hit);
         setFound(hit);
         setLoadError('');
       } catch (err) {
-        setLoadError(`Couldn’t load public chargers: ${(err as Error).message}`);
+        setLoadError(`Couldn’t load chargers: ${(err as Error).message}`);
       }
     }, 350);
     return () => clearTimeout(t);
   }, [view, fast]);
 
+  // the real bays come with every /api/state poll, so their LEDs stay live
+  const realBays = state?.realBays?.length ? state.realBays : found.realBays;
+  const all = useMemo(() => {
+    const byId = new Map<string, Bay>();
+    for (const b of [...found.bays, ...realBays, ...(extra ? [extra] : [])]) byId.set(b.id, b);
+    return byId;
+  }, [found.bays, realBays, extra]);
+
+  // a linked bay we don't have yet (not in the box, or the box isn't loaded): fetch it by id
+  useEffect(() => {
+    if (!linked || all.has(linked)) return;
+    api<BayDetail>('GET', `/api/bays/${encodeURIComponent(linked)}`).then(setExtra, () => setSelectedId(null));
+  }, [linked, all]);
+
+  const selected = selectedId ? all.get(selectedId) : undefined;
+  // &reserve=1 opens booking for the linked bay as soon as it's known
+  const bookingBay = booking ?? (wantsBooking ? (selected ?? null) : null);
+  function closeBooking() {
+    setBooking(null);
+    setWantsBooking(false);
+  }
+
   const from = me ?? view?.center ?? null; // distances are from you, or from the map centre
-  const visible = useMemo(() => (reservableOnly ? [] : found.chargers), [found, reservableOnly]);
   const rows: Row[] = useMemo(
     () =>
-      visible
-        .map((charger) => ({ charger, distance: from ? distanceM(from, charger) : null }))
+      found.bays
+        .filter((b) => !b.real && (!freeNow || b.led === 'green'))
+        .map((bay) => ({ bay, distance: from ? distanceM(from, bay) : null }))
         .sort((a, b) => (a.distance ?? 0) - (b.distance ?? 0))
         .slice(0, LIST_CAP),
-    [visible, from],
+    [found.bays, freeNow, from],
   );
+  const more = found.bays.filter((b) => !b.real).length > LIST_CAP;
 
   if (!state) return <div className="absolute inset-0 animate-pulse bg-sunken" />;
 
-  // the three Baywatch bays, live with every /api/state poll; an unknown id (an old link) means the first one
-  const realBays = state.realBays ?? [];
-  const bayById = (id: string | null) => (id === null ? undefined : (realBays.find((b) => b.id === id) ?? realBays[0]));
-  const selectedBay = selected?.kind === 'bay' ? bayById(selected.id) : undefined;
-  const reserveBay = bayById(reserveFor) ?? null;
-  const mineId = state.viewer?.active?.bayId ?? state.viewer?.next?.bayId ?? null;
-  const center = realBays[0] ?? state.bay;
-  const charger = selected?.kind === 'charger' ? visible.find((c) => c.id === selected.id) : undefined;
-
-  const zoomNote = view && view.zoom < MIN_ZOOM ? 'Zoom in to see public chargers.' : '';
-  const note = loadError || found.warning || zoomNote || (!reservableOnly && view && !visible.length ? 'No public chargers in this area.' : '');
+  const center = realBays[0] ?? { lat: 52.52, lng: 13.405 };
+  const zoomNote = view && view.zoom < MIN_ZOOM ? 'Zoom in to see the chargers around you.' : '';
+  const note = loadError || found.warning || zoomNote || (view && !rows.length ? (freeNow ? 'No free chargers in this area right now.' : 'No chargers in this area.') : '');
 
   function fly(p: Point, zoom = 14.5) {
     map.current?.flyTo({ center: [p.lng, p.lat], zoom, duration: reducedMotion() ? 0 : 900 });
   }
 
-  function select(next: Selection) {
-    setSelected(next);
+  function select(id: string) {
+    setSelectedId(id);
     setSheetOpen(true);
-    const target = next?.kind === 'bay' ? bayById(next.id) : next?.kind === 'charger' ? visible.find((c) => c.id === next.id) : null;
+    const target = all.get(id);
     if (target) fly(target, Math.max(view?.zoom ?? 14.5, 14.5));
   }
 
@@ -122,7 +137,7 @@ export function Explore() {
       const [place] = (await res.json()) as { lat: string; lon: string }[];
       if (!place) return setSearchNote(`No place found for “${query}”.`);
       setSearchNote('');
-      setSelected(null);
+      setSelectedId(null);
       fly({ lat: Number(place.lat), lng: Number(place.lon) }, 14);
     } catch {
       setSearchNote('Search isn’t available right now.');
@@ -145,7 +160,7 @@ export function Explore() {
       <form onSubmit={search} role="search" className="flex gap-2">
         <label className="relative flex-1">
           <span className="sr-only">Search a place</span>
-          <Search className="pointer-events-none absolute left-3.5 top-1/2 size-5 -translate-y-1/2 text-faint" />
+          <Search aria-hidden className="pointer-events-none absolute left-3.5 top-1/2 size-5 -translate-y-1/2 text-faint" />
           <input
             value={query}
             onChange={(e) => setQuery(e.target.value)}
@@ -160,12 +175,12 @@ export function Explore() {
           aria-label="Locate me"
           className="grid size-12 shrink-0 place-items-center rounded-full bg-surface text-ink shadow-[0_2px_10px_-2px_rgb(15_20_25/0.2)] ring-1 ring-line-strong hover:bg-sunken"
         >
-          <LocateFixed className="size-5" />
+          <LocateFixed aria-hidden className="size-5" />
         </button>
       </form>
       <div className="flex gap-2 overflow-x-auto pb-1">
         {chip(fast, 'Fast ≥ 50 kW', () => setFast((v) => !v))}
-        {chip(reservableOnly, 'Reservable only', () => setReservableOnly((v) => !v))}
+        {chip(freeNow, 'Free now', () => setFreeNow((v) => !v))}
       </div>
       {searchNote && (
         <p role="status" className="rounded-2xl bg-surface px-4 py-2 text-sm text-muted shadow-sm ring-1 ring-line">
@@ -175,42 +190,12 @@ export function Explore() {
     </div>
   );
 
-  const panel =
-    selectedBay ? (
-      // details only show distance from you: the map re-centres on what you picked, so a centre distance means nothing
-      <RealBayDetail
-        bay={selectedBay}
-        mine={selectedBay.id === mineId}
-        distance={me ? distanceM(me, selectedBay) : null}
-        onBack={() => setSelected(null)}
-        onBook={() => setReserveFor(selectedBay.id)}
-      />
-    ) : charger ? (
-      <ChargerDetail
-        charger={charger}
-        distance={me ? distanceM(me, charger) : null}
-        onBack={() => setSelected(null)}
-        onBook={() => {
-          if (!realBays[0]) return;
-          setSelected({ kind: 'bay', id: realBays[0].id });
-          setSheetOpen(true);
-          fly(realBays[0], 15);
-          setReserveFor(realBays[0].id);
-        }}
-      />
-    ) : (
-      <ChargerList
-        realBays={realBays}
-        mineId={mineId}
-        fromYou={!!me}
-        rows={rows}
-        more={visible.length > LIST_CAP}
-        note={note}
-        onSelectBay={(id) => select({ kind: 'bay', id })}
-        onBook={setReserveFor}
-        onSelect={(id) => select({ kind: 'charger', id })}
-      />
-    );
+  const panel = selected ? (
+    // details only show distance from you: the map re-centres on what you picked, so a centre distance means nothing
+    <BayPanel bay={selected} distance={me ? distanceM(me, selected) : null} onBack={() => setSelectedId(null)} onBook={setBooking} />
+  ) : (
+    <BayList realBays={realBays} rows={rows} fromYou={!!me} more={more} note={note} onSelect={select} onBook={setBooking} />
+  );
 
   return (
     <div className="fixed inset-x-0 bottom-[calc(3.75rem+1px+env(safe-area-inset-bottom))] top-14 lg:bottom-0 lg:top-16 lg:flex">
@@ -221,20 +206,17 @@ export function Explore() {
 
       <div className="relative h-full flex-1 max-lg:[&_.maplibregl-ctrl-group]:hidden">
         <MapView
-          chargers={visible}
+          bays={found.bays}
           realBays={realBays}
           center={center}
-          mineId={mineId}
-          selectedBayId={selectedBay?.id ?? null}
-          selectedId={charger?.id ?? null}
+          selectedId={selectedId}
           me={me}
           onReady={(m) => {
             map.current = m;
-            if (selectedBay) fly(selectedBay, 15);
+            if (selected) fly(selected, 15);
           }}
           onView={setView}
-          onSelectCharger={(id) => select({ kind: 'charger', id })}
-          onSelectBay={(id) => select({ kind: 'bay', id })}
+          onSelect={select}
         />
         <div className="absolute inset-x-3 top-3 z-(--z-map-ui) lg:hidden">{controls}</div>
 
@@ -244,24 +226,18 @@ export function Explore() {
           data-open={sheetOpen}
           className="absolute inset-x-0 bottom-0 z-(--z-sheet) flex h-[78%] translate-y-[calc(100%-11.5rem)] flex-col rounded-t-3xl bg-page shadow-[0_-12px_40px_-12px_rgb(15_20_25/0.3)] transition-transform duration-300 ease-out data-[open=true]:translate-y-0 lg:hidden"
         >
-          <button
-            type="button"
-            onClick={() => setSheetOpen((v) => !v)}
-            aria-expanded={sheetOpen}
-            className="flex w-full flex-col items-center gap-1.5 pb-2 pt-2.5"
-          >
-            <span className="h-1.5 w-10 rounded-full bg-line-strong/60" />
+          <button type="button" onClick={() => setSheetOpen((v) => !v)} aria-expanded={sheetOpen} className="flex min-h-11 w-full flex-col items-center gap-1.5 pb-2 pt-2.5">
+            <span aria-hidden className="h-1.5 w-10 rounded-full bg-line-strong/60" />
             <span className="flex items-center gap-1 font-mono text-xs font-semibold uppercase tracking-[0.1em] text-muted">
-              {sheetOpen ? 'Show map' : `${rows.length ? `${rows.length}${visible.length > LIST_CAP ? '+' : ''} chargers nearby` : 'Chargers'}`}
-              <ChevronUp className={`size-4 transition-transform ${sheetOpen ? 'rotate-180' : ''}`} />
+              {sheetOpen ? 'Show map' : rows.length ? `${rows.length}${more ? '+' : ''} chargers nearby` : 'Chargers'}
+              <ChevronUp aria-hidden className={`size-4 transition-transform ${sheetOpen ? 'rotate-180' : ''}`} />
             </span>
           </button>
           <div className="flex-1 overflow-y-auto px-4 pb-6">{panel}</div>
         </section>
       </div>
 
-      <ReserveDialog bay={reserveBay} open={!!reserveBay} onClose={() => setReserveFor(null)} />
+      <BookingFlow bay={bookingBay} onClose={closeBooking} />
     </div>
   );
 }
-

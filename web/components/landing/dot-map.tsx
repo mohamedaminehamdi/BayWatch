@@ -5,13 +5,13 @@ import { formatDistance } from '@/lib/geo';
 
 export type Dot = { id: number; name: string; x: number; y: number; powerKw: number; distance: number };
 
-// Chart roles come from the theme tokens: context grey (3.6:1 on the surface) for public chargers, and the bay in
-// lime with an ink ring (lime alone is 1.4:1 on white; the ring is 18:1). The surface-coloured ring keeps dots apart.
+// Chart roles come from the theme tokens: context grey (3.6:1 on the surface) for public chargers, and the Baywatch
+// bays in violet with a white bolt, like their pins on the app's map. The surface-coloured ring keeps dots apart.
 const halo = { paintOrder: 'stroke', stroke: 'var(--color-surface)', strokeWidth: 4 } as const;
 
-// Public chargers around the bay (context, grey) and the one reservable bay (emphasis, lime).
-// Coordinates are already projected into the 400×400 viewBox: bay at the centre, 2 km = 180 units.
-export function DotMap({ dots, bayName }: { dots: Dot[]; bayName: string }) {
+// Public chargers around the Baywatch bays (context, grey) and the bays themselves (emphasis, violet).
+// Coordinates are already projected into the 400×400 viewBox: the bays at the centre, 2 km = 180 units.
+export function DotMap({ dots }: { dots: Dot[] }) {
   const svg = useRef<SVGSVGElement>(null);
   const [hover, setHover] = useState<Dot | null>(null);
 
@@ -44,14 +44,14 @@ export function DotMap({ dots, bayName }: { dots: Dot[]; bayName: string }) {
           <circle key={d.id} cx={d.x} cy={d.y} r="5" strokeWidth="2" className="fill-context stroke-surface" />
         ))}
         {hover && <circle cx={hover.x} cy={hover.y} r="8" fill="none" strokeWidth="2" className="stroke-ink" />}
-        <circle cx="200" cy="200" r="16" className="origin-[200px_200px] animate-pulse-ring fill-signal" />
-        <circle cx="200" cy="200" r="11" strokeWidth="3" className="fill-signal stroke-ink" />
-        <path d="M201.5 193.5 196.5 201h3.4l-1.4 5.5 5-7.6h-3.4z" className="fill-ink" />
+        <circle cx="200" cy="200" r="16" className="origin-[200px_200px] animate-pulse-ring fill-accent/40" />
+        <circle cx="200" cy="200" r="11" strokeWidth="3" className="fill-accent stroke-surface" />
+        <path d="M201.5 193.5 196.5 201h3.4l-1.4 5.5 5-7.6h-3.4z" className="fill-surface" />
         <text x="217" y="196" className="fill-ink text-[15px] font-bold" style={halo}>
-          {bayName}
+          Baywatch bays
         </text>
         <text x="217" y="213" className="fill-accent font-mono text-[12px] font-semibold uppercase tracking-[0.06em]" style={halo}>
-          reservable
+          at the venue
         </text>
       </svg>
 
@@ -71,10 +71,10 @@ export function DotMap({ dots, bayName }: { dots: Dot[]; bayName: string }) {
 
       <ul className="mt-4 flex flex-wrap gap-x-6 gap-y-2 text-sm text-muted">
         <li className="flex items-center gap-2">
-          <span className="size-2.5 rounded-full bg-context" /> Public charger, first come first served
+          <span className="size-2.5 rounded-full bg-context" /> Public charger, bookable (simulated guard)
         </li>
         <li className="flex items-center gap-2">
-          <span className="size-2.5 rounded-full bg-signal ring-1 ring-ink" /> Baywatch bay, guarded
+          <span className="size-2.5 rounded-full bg-accent" /> Baywatch bays
         </li>
       </ul>
     </div>

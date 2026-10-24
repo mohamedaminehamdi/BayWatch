@@ -28,6 +28,7 @@ import {
   MAX_UPCOMING,
   MIN_GAP_MS,
   noShowCents,
+  nowSlot,
   reminderTimes,
   slotProblem,
   WALKUP_CLEAR_MS,
@@ -50,7 +51,7 @@ import type { BayInfo } from './bays.ts';
 import type { Payment } from './payments.ts';
 import { fail } from './errors.ts';
 import { distanceM } from './geo.ts';
-import { maskPlate, normalizePlate, samePlate } from './plates.ts';
+import { cameraPlate, maskPlate, normalizePlate, samePlate } from './plates.ts';
 import { formatEuro, RECEIPT, total } from './pricing.ts';
 
 export const EVIDENCE_MS = 3 * 60_000; // how recently the bay must have seen a car: fallback check-in, walk-up
@@ -62,10 +63,11 @@ const ARM_RETRY_MS = 30_000; // matches the adapter's command cooldown
 // The adapter for real locks (lib/ecurious.ts). It keeps every safety check: never raises onto a car, refuses
 // an offline bay, cools down after a failed command, never retries a write.
 export interface Hardware {
-  raise(lockId: string, plates: string[]): Promise<unknown>;
-  lower(lockId: string): Promise<unknown>;
-  setPlates(lockId: string, plates: string[]): Promise<unknown>; // the camera's own allow-list, while armed
-  status(lockId: string): Promise<{ state: string; mock: boolean; online?: boolean; carPresence?: 'occupied' | 'vacant' | null }>;
+  raise(lockId: string, plates: string[]): Promise<{ autoUnlock: 'camera' | 'app' } | void>; // 'camera': it took the plates
+  lower(lockId: string): Promise<unknown>; // and empties the camera's list
+  setPlates(lockId: string, plates: string[]): Promise<boolean | void>; // the camera's own allow-list, while armed
+  // listOk: the camera's allow-list is exactly what was last set (false: it changed, e.g. back to ['*']; null: unknown)
+  status(lockId: string): Promise<{ state: string; mock: boolean; online?: boolean; carPresence?: 'occupied' | 'vacant' | null; listOk?: boolean | null }>;
 }
 
 // Credit per driver: Clerk privateMetadata in the app (server.ts), a Map in tests
@@ -87,6 +89,8 @@ export interface Booking {
   status: Status;
   plate: string | null; // erased when the booking ends
   extraPlate: string | null; // "different car today", erased with it
+  cameraPlate?: string; // the plate as the camera reads it (Han characters kept), for its allow-list; erased with it
+  extraCameraPlate?: string;
   vehicleLabel: string;
   createdAt: number;
   start: number;
@@ -111,6 +115,7 @@ export interface Booking {
   charges: Charge[];
   armed: boolean; // the arm was raised for this booking
   armTriedAt?: number;
+  autoUnlock?: 'camera' | 'app'; // who lowers the arm for the booked car: the camera (its plate list) or our match
   reroute?: string[]; // bay ids of free alternatives while blocked
   partner?: string;
   paymentIntentId?: string; // a card hold, for lib/payments.ts
@@ -139,6 +144,8 @@ type Site = {
   occupied: boolean; // simulated bays: the demo's "car in bay"
   loweredForSession: boolean; // the arm went down for a session: raise it once that car has left
   hw?: { online: boolean; carPresence: 'occupied' | 'vacant' | null; mock: boolean }; // the lock, as last read
+  listTriedAt?: number; // the camera's allow-list was last set again (it had changed)
+  listNoted?: boolean; // that change is in the log: once until the list is right again
 };
 
 const REMINDER_NOTES: Record<ReminderKey, string> = {
@@ -165,6 +172,7 @@ export function createSchedule({
   onAlert = () => {},
   onEnd = () => {},
   nearby = async () => [],
+  cameraWaitMs = 3_000,
 }: {
   bays: BayInfo[]; // the Baywatch bays; GoingElectric bays are added as drivers find them (knowBay)
   hw: Hardware;
@@ -174,6 +182,7 @@ export function createSchedule({
   onAlert?: (alert: Alert, bay: BayInfo) => void; // a blocked Baywatch bay: email the operator
   onEnd?: (booking: Booking) => void; // every end state, once the receipt is final (card payments settle here)
   nearby?: (bay: BayInfo) => Promise<BayInfo[]>; // candidates for re-routing a blocked booking
+  cameraWaitMs?: number; // how long a plate match waits for the camera to lower the arm itself
 }) {
   const bays = new Map<string, BayInfo>(initial.map((b) => [b.id, b]));
   const sites = new Map<string, Site>();
@@ -198,12 +207,14 @@ export function createSchedule({
   const bayOf = (id: string) => bays.get(id) ?? fail(404, 'Unknown bay');
   const open = (bayId: string) => all.filter((b) => b.bayId === bayId && OPEN.includes(b.status)).sort((a, b) => a.start - b.start);
   const inBay = (bayId: string) => all.find((b) => b.bayId === bayId && IN_BAY.includes(b.status));
-  const arriveBy = (b: Booking) => b.start + ARRIVAL_GRACE_MS + b.blockedMs + (b.blockedSince === null ? 0 : now() - b.blockedSince);
+  // 15 min from the start, or from booking for a slot already under way ("Book now"), plus any time it was blocked
+  const arriveBy = (b: Booking) => Math.max(b.start, b.createdAt) + ARRIVAL_GRACE_MS + b.blockedMs + (b.blockedSince === null ? 0 : now() - b.blockedSince);
   const isLive = (b: Booking) => b.status === 'booked' && now() >= b.start - LIVE_MS && now() <= arriveBy(b);
   const liveOn = (bayId: string) => open(bayId).find(isLive);
   const upcomingOf = (ownerId: string) => all.filter((b) => b.ownerId === ownerId && b.status === 'booked');
   const addCharge = (b: Booking, kind: Charge['kind'], label: string, cents: number) => b.charges.push({ kind, label, cents, at: now() });
-  const plates = (b: Booking) => [b.plate, b.extraPlate].filter((p): p is string => !!p);
+  // what the camera's allow-list holds for a booking: its plates as the camera reads them
+  const plates = (b: Booking) => [b.cameraPlate ?? b.plate, b.extraCameraPlate ?? b.extraPlate].filter((p): p is string => !!p);
 
   // A GoingElectric bay found on the map, so it can be booked by id. Baywatch bays are never replaced.
   function knowBay(info: BayInfo) {
@@ -218,6 +229,7 @@ export function createSchedule({
   function dropLocks(valid: string[]) {
     for (const b of bays.values()) {
       if (b.lockId && !valid.includes(b.lockId)) {
+        console.warn(`[ecurious] ${b.lockId} isn't one of the team's locks: ${b.id} runs without hardware`);
         note('hardware', `${b.lockId} isn’t one of the team’s locks: ${b.name} runs without hardware`, b.id);
         bays.set(b.id, { ...b, lockId: undefined, guard: 'simulated' });
       }
@@ -319,6 +331,8 @@ export function createSchedule({
       ...(b.status === 'booked' && { carAtBay: isLive(b) && (!bays.get(b.bayId)?.lockId || evidence(b)) }),
       ...(b.plate && { plateHint: maskPlate(b.plate) }),
       ...(b.extraPlate && { extraPlateHint: maskPlate(b.extraPlate) }),
+      // the driver's own plates, to the driver only: what the camera lets in by itself while the arm is up for them
+      ...(b.status === 'booked' && b.armed && bays.get(b.bayId)?.lockId && { cameraList: { plates: plates(b), ok: b.autoUnlock === 'camera' } }),
       vehicleLabel: b.vehicleLabel,
       ...(b.arrivedAt && { arrivedAt: b.arrivedAt }),
       ...(b.chargingAt && { chargingAt: b.chargingAt }),
@@ -334,21 +348,36 @@ export function createSchedule({
   // A slot's problem beyond the grid rules: out of order, taken (with the gap), or the driver's limit
   function conflict(ownerId: string | null, bay: BayInfo, start: number, end: number) {
     if (bay.fault) return 'This charger is reported out of order';
+    if (start - now() <= ARM_MS && occupiedNow(bay)) return 'A car is in the bay right now';
     if (open(bay.id).some((b) => clash(start, end, b.start, b.end))) return 'Taken: this slot overlaps another booking or its 10-minute gap';
     if (ownerId && upcomingOf(ownerId).length >= MAX_UPCOMING) return `You can have up to ${MAX_UPCOMING} upcoming bookings. Cancel one to book another.`;
     return null;
+  }
+
+  // A car is in the bay at this moment: a session, a car without a booking, the demo's "car in bay", or the lock's sensor
+  function occupiedNow(bay: BayInfo) {
+    const st = site(bay.id);
+    return !!st.blocker || st.occupied || !!inBay(bay.id) || (!!bay.lockId && st.hw?.carPresence === 'occupied');
   }
 
   function priced(bay: BayInfo, start: number) {
     return bookingFee(bay.class, demandAt(start, { override: demand, holidays }));
   }
 
-  function quoteWith(viewerId: string | null, bayId: string, start: number, blocks: number, w: Wallet): Quote {
+  // A start and length as asked, or "Book now" ('now'): the block under way, for at least an hour from this moment
+  function slotFor(bay: BayInfo, start: unknown, blocks: unknown) {
+    const t = now();
+    if (start === 'now') return { ...nowSlot(bay.class, t), earliest: blockStart(t) };
+    return { start: Number(start), blocks: Number(blocks), earliest: earliestStart(t) };
+  }
+
+  function quoteWith(viewerId: string | null, bayId: string, asked: number | 'now', askedBlocks: number, w: Wallet): Quote {
     const bay = bayOf(bayId);
     const t = now();
+    const { start, blocks, earliest } = slotFor(bay, asked, askedBlocks);
     const fee = priced(bay, Number.isFinite(start) ? start : t); // a bad start is reported, not thrown
     const end = start + blocks * BLOCK_MS;
-    const reason = slotProblem(bay.class, start, blocks, t) ?? conflict(viewerId, bay, start, end);
+    const reason = slotProblem(bay.class, start, blocks, t, earliest) ?? conflict(viewerId, bay, start, end);
     const credit = w.firstFree ? fee.cents : Math.min(w.creditCents, fee.cents);
     return {
       bayId,
@@ -368,14 +397,14 @@ export function createSchedule({
     };
   }
 
-  async function quoteSlot(viewerId: string | null, bayId: string, start: number, blocks: number): Promise<Quote> {
+  async function quoteSlot(viewerId: string | null, bayId: string, start: number | 'now', blocks: number): Promise<Quote> {
     bayOf(bayId);
     return quoteWith(viewerId, bayId, start, blocks, viewerId ? await walletOf(viewerId) : NO_WALLET);
   }
 
   // The same quote without waiting, for callers that quote many slots in a row (voice): the driver's credit is
   // used only once their wallet is loaded, and a first call starts loading it
-  function quoteNow(viewerId: string | null, bayId: string, start: number, blocks: number): Quote & { creditKnown: boolean } {
+  function quoteNow(viewerId: string | null, bayId: string, start: number | 'now', blocks: number): Quote & { creditKnown: boolean } {
     bayOf(bayId);
     const w = viewerId && hasWallet(viewerId) ? wallets.get(viewerId) : NO_WALLET;
     if (viewerId && !w) void walletOf(viewerId).catch(() => {});
@@ -387,16 +416,18 @@ export function createSchedule({
     const bay = bays.get(b.bayId)!;
     const st = site(b.bayId);
     b.armTriedAt = now();
-    if (bay.lockId) await hw.raise(bay.lockId, plates(b));
+    if (bay.lockId) b.autoUnlock = (await hw.raise(bay.lockId, plates(b)))?.autoUnlock ?? 'app';
     else if (st.occupied || st.blocker || inBay(b.bayId)) throw new Error('A car is in the bay, so the guard did not rise');
     b.armed = true;
   }
 
   type ReserveInput = {
     bayId: string;
-    start: unknown;
-    blocks: unknown;
+    start?: unknown;
+    blocks?: unknown;
+    now?: boolean; // "Book now": start and length are set here (slotFor), and the arrival grace counts from booking
     plate: unknown;
+    cameraPlate?: unknown; // the plate as typed, Han characters and all (vehicles.ts); default: from `plate`
     vehicleLabel: string;
     expectedCents?: unknown; // the price the driver saw: a different one now is a 409
     partner?: string;
@@ -407,13 +438,12 @@ export function createSchedule({
     const bay = bayOf(input.bayId);
     const plate = normalizePlate(input.plate);
     if (plate.length < 2 || plate.length > 10) fail(400, 'Enter a valid license plate');
-    const start = Number(input.start);
-    const blocks = Number(input.blocks);
-    const slot = slotProblem(bay.class, start, blocks, now());
-    if (slot) fail(400, slot);
     const w = hasWallet(ownerId) ? await walletOf(ownerId) : null;
     // from here to the hardware call nothing awaits, so a second request can't take the same slot
     const t = now();
+    const { start, blocks, earliest } = slotFor(bay, input.now === true ? 'now' : input.start, input.blocks);
+    const slot = slotProblem(bay.class, start, blocks, t, earliest);
+    if (slot) fail(400, slot);
     const end = start + blocks * BLOCK_MS;
     const taken = conflict(ownerId, bay, start, end);
     if (taken) fail(409, taken);
@@ -430,6 +460,7 @@ export function createSchedule({
       status: 'booked',
       plate,
       extraPlate: null,
+      cameraPlate: cameraPlate(input.cameraPlate ?? input.plate) || plate,
       vehicleLabel: input.vehicleLabel,
       createdAt: t,
       start,
@@ -492,7 +523,7 @@ export function createSchedule({
   // ── Ending ──────────────────────────────────────────────────────────────────────────────────────
   function end(b: Booking, status: Status) {
     if (b.blockedSince !== null) b.blockedMs += now() - b.blockedSince;
-    Object.assign(b, { status, endedAt: now(), plate: null, extraPlate: null, blockedSince: null, reroute: undefined, reminders: [] });
+    Object.assign(b, { status, endedAt: now(), plate: null, extraPlate: null, cameraPlate: undefined, extraCameraPlate: undefined, blockedSince: null, reroute: undefined, reminders: [] });
     const ended = all.filter((x) => !OPEN.includes(x.status));
     if (ended.length > HISTORY_CAP) all.splice(all.indexOf(ended[0]), 1);
     onEnd(b);
@@ -557,11 +588,27 @@ export function createSchedule({
     site(b.bayId).loweredForSession = true;
   }
 
-  async function checkIn(b: Booking, method: 'camera' | 'fallback', matchedBy?: 'exact' | 'fuzzy') {
+  // Has the camera lowered the arm by itself (its plate list)? The status is cached and kept current by the lock's
+  // events, so this waits a little for the status_change, then reads once more
+  async function lowered(lockId: string) {
+    const until = Date.now() + cameraWaitMs; // wall time: the arm moves in real time
+    for (;;) {
+      if ((await hw.status(lockId)).state === 'free') return true;
+      if (Date.now() >= until) return false;
+      await new Promise((r) => setTimeout(r, 250));
+    }
+  }
+
+  async function checkIn(b: Booking, method: 'camera' | 'fallback', matchedBy?: 'exact' | 'fuzzy', how?: string) {
     const st = site(b.bayId);
+    const lockId = bays.get(b.bayId)?.lockId;
     b.status = 'arrived'; // before the await: a second camera read can't check in twice
     try {
-      await lowerFor(b);
+      // the camera may already have let the booked car in: then no second unlock, only its list cleared
+      if (lockId && method === 'camera' && b.autoUnlock === 'camera' && (await lowered(lockId))) {
+        await hw.setPlates(lockId, []);
+        st.loweredForSession = true;
+      } else await lowerFor(b);
     } catch (e) {
       b.status = 'booked';
       fail(502, `Could not lower the arm: ${message(e)}`);
@@ -573,7 +620,11 @@ export function createSchedule({
       b.reroute = undefined;
     }
     Object.assign(b, { arrivedAt: now(), checkInMethod: method, ...(matchedBy && { matchedBy }) });
-    note('checked_in', method === 'camera' ? (matchedBy === 'fuzzy' ? 'plate matched despite a misread, arm lowered' : 'plate matched, arm lowered') : 'driver checked in at the bay, arm lowered', b.bayId);
+    note(
+      'checked_in',
+      how ?? (method === 'camera' ? (matchedBy === 'fuzzy' ? 'plate matched despite a misread, arm lowered' : 'plate matched, arm lowered') : 'driver checked in at the bay, arm lowered'),
+      b.bayId,
+    );
   }
 
   // Every car the camera sees arrive. An empty plate: it saw a car but couldn't read it.
@@ -594,6 +645,7 @@ export function createSchedule({
     }
     if (!read) {
       b.unreadableAt = now();
+      if (bay.lockId && (await letIn(b, await hw.status(bay.lockId)))) return { matched: true };
       note('unreadable_plate', 'the camera saw a car but could not read the plate', bayId);
       return { matched: false };
     }
@@ -738,18 +790,24 @@ export function createSchedule({
   }
 
   // "Different car today": a one-off second plate for this booking, or a switch to another registered car
-  function setPlate(ownerId: string, id: string, change: { plate?: unknown; vehicle?: { plate: string; label: string } }) {
+  function setPlate(ownerId: string, id: string, change: { plate?: unknown; vehicle?: { plate: string; label: string; cameraPlate?: string } }) {
     const b = own(ownerId, id);
     if (b.status !== 'booked') fail(409, 'The car can be changed until you arrive');
     if (change.vehicle) {
-      Object.assign(b, { plate: change.vehicle.plate, vehicleLabel: change.vehicle.label, extraPlate: null });
+      const { plate, label, cameraPlate: camera } = change.vehicle;
+      Object.assign(b, { plate, cameraPlate: camera ?? plate, vehicleLabel: label, extraPlate: null, extraCameraPlate: undefined });
     } else {
       const p = normalizePlate(change.plate);
       if (p.length < 2 || p.length > 10) fail(400, 'Enter a valid license plate');
       b.extraPlate = p;
+      b.extraCameraPlate = cameraPlate(change.plate) || p;
     }
     const lockId = bays.get(b.bayId)?.lockId;
-    if (lockId && b.armed) void hw.setPlates(lockId, plates(b)).catch((e) => note('error', `camera plate list not updated: ${message(e)}`, b.bayId));
+    if (lockId && b.armed)
+      void hw
+        .setPlates(lockId, plates(b))
+        .then((ok) => (b.autoUnlock = ok ? 'camera' : 'app'))
+        .catch((e) => note('error', `camera plate list not updated: ${message(e)}`, b.bayId));
     note('other_plate', change.vehicle ? 'driver switched to another of their cars' : 'driver added a plate for today', b.bayId);
     return view(b);
   }
@@ -831,17 +889,42 @@ export function createSchedule({
       const s = await hw.status(bay.lockId!);
       st.hw = { online: s.online !== false, carPresence: s.carPresence ?? null, mock: s.mock };
       if (s.mock) continue; // the mock has no sensor
+      await keepList(bay, st, s.listOk);
       if (s.carPresence === 'vacant' && st.blocker) unblock(bay.id, 'sensor');
       if (s.carPresence === 'occupied' && !inBay(bay.id)) {
         st.seenAt = now();
         const live = liveOn(bay.id);
-        if (live) live.presenceAt = now();
-        else if (!st.blocker) {
+        if (live) {
+          live.presenceAt = now();
+          if (live.unreadableAt && now() - live.unreadableAt <= EVIDENCE_MS) await letIn(live, s).catch((e) => note('error', message(e), bay.id));
+        } else if (!st.blocker) {
           st.blocker = { since: now() };
           note('bay_occupied', 'a car without a booking is in the bay', bay.id);
         }
       }
     }
+  }
+
+  // The camera's allow-list must stay what was last set: the booked plates while the arm is up for a booking, else
+  // nothing. If it changed (a reset to ['*'] lets any car in), set it again, at most every 30 s, noted once.
+  async function keepList(bay: BayInfo, st: Site, listOk: boolean | null | undefined) {
+    if (listOk !== false) return void (listOk && (st.listNoted = false));
+    if (now() - (st.listTriedAt ?? 0) < ARM_RETRY_MS) return;
+    st.listTriedAt = now();
+    if (!st.listNoted) note('camera_list', 'the camera’s allow-list wasn’t what was set (the booked plate, or nobody): set it again', bay.id);
+    st.listNoted = true;
+    const b = !inBay(bay.id) && open(bay.id).find((x) => x.status === 'booked' && x.armed);
+    const ok = await hw.setPlates(bay.lockId!, b ? plates(b) : []).catch(() => false);
+    if (b) b.autoUnlock = ok ? 'camera' : 'app';
+  }
+
+  // A held booking whose plate the camera couldn't read, yet the camera let the car in by itself (its allow-list
+  // holds only this booking's plates): the arm is down and a car is on the sensor, so that's the booked car
+  async function letIn(b: Booking, s: { state: string; carPresence?: string | null; listOk?: boolean | null }) {
+    if (!b.armed || b.autoUnlock !== 'camera' || b.blockedSince !== null || inBay(b.bayId)) return false;
+    if (s.state !== 'free' || s.carPresence !== 'occupied' || s.listOk === false) return false;
+    await checkIn(b, 'camera', undefined, 'barrier let the car in');
+    return true;
   }
 
   async function tick() {

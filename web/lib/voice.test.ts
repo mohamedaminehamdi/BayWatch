@@ -1,5 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import type { BayInfo } from './bays.ts';
+import { bookingApi } from './booking-api.ts';
+import { createSchedule } from './schedule.ts';
 import { bearerOk, createVoice, signVoiceToken, verifyVoiceToken, type BookingService, type VoiceBay, type VoiceConfig } from './voice.ts';
 
 const MIN = 60_000;
@@ -16,7 +19,7 @@ function setup({ cents = 250 } = {}) {
   const taken: { bayId: string; start: number; end: number }[] = [];
   const booked: { id: string; account: string; bayId: string; start: number; blocks: number; priceCents: number; vehicleId: string }[] = [];
   const cars: Record<string, string> = { user_demo: 'car-1' }; // each driver's first car
-  const price = { cents };
+  const price = { cents, moveOnBook: false }; // moveOnBook: the price changes while the booking is being made
   const clash = (bayId: string, start: number, end: number) =>
     [...taken, ...booked.map((b) => ({ ...b, end: b.start + b.blocks * 15 * MIN }))].some((x) => x.bayId === bayId && start < x.end && x.start < end);
   const service: BookingService = {
@@ -24,6 +27,10 @@ function setup({ cents = 250 } = {}) {
     quote: (bayId, start, blocks) => ({ cents: price.cents, valid: !clash(bayId, start, start + blocks * 15 * MIN) }),
     book: async (account, s) => {
       await new Promise((r) => setTimeout(r, 5)); // slow enough for a parallel confirm to arrive meanwhile
+      if (price.moveOnBook) {
+        price.cents += 125;
+        throw Object.assign(new Error('The price is now €3.75'), { status: 409 });
+      }
       if (clash(s.bayId, s.start, s.start + s.blocks * 15 * MIN)) throw Object.assign(new Error('Taken'), { status: 409 });
       const b = { id: `bk-${booked.length + 1}`, account, ...s };
       booked.push(b);
@@ -101,6 +108,12 @@ test('expired, foreign, unknown or overtaken quotes cannot be confirmed', async 
   assert.equal(gone.status, 'unavailable');
   assert.equal(gone.alternatives[0].place, 'Baywatch Bay 2', 'the same time at the other bay first');
   taken.length = 0;
+
+  price.moveOnBook = true; // the engine refuses with a 409 because the price moved in that moment
+  const moved = await tool('confirm_reservation', { quoteId });
+  assert.deepEqual([moved.status, moved.priceCents], ['expired', 375], 'quoted again: still free, new price');
+  price.moveOnBook = false;
+  price.cents = 250;
 
   tick(6 * MIN);
   assert.equal((await tool('confirm_reservation', { quoteId })).status, 'expired');
@@ -254,4 +267,68 @@ test('session tokens fail closed without a secret', () => {
   assert.equal(expiresAt, T0 + 15 * MIN);
   assert.equal(verifyVoiceToken(token, undefined, T0), null);
   assert.equal(verifyVoiceToken(token, SECRET, T0), 'user_a');
+});
+
+// VERIFY against the real v2 engine (schedule.ts + booking-api.ts), with fake hardware, wallets and cars as in
+// booking-api.test.ts. Real clock: the bookings are for tomorrow afternoon.
+test('the real engine: bookings land under the token’s driver, quotes book nothing, stale quotes are refused', async () => {
+  const bay = (n: number): BayInfo => ({
+    id: `bw-${n}`, name: `Baywatch Bay ${n}`, lat: 52.52, lng: 13.405, address: 'Hackathon venue, Berlin',
+    points: [{ type: 'CCS', power: 200, count: 1 }], powerKw: 200, class: 'fast', real: true, guard: 'simulated',
+  });
+  const hw = { raise: async () => {}, lower: async () => {}, setPlates: async () => {}, status: async () => ({ state: 'blocked', mock: true }) };
+  const schedule = createSchedule({ bays: [bay(1), bay(2)], hw, wallets: { load: async () => ({ creditCents: 0, firstFree: false }), save: async () => {} } });
+  const car = (id: string) => [{ id, plate: 'MAB1234', display: 'M AB 1234', label: 'Blue Zoe', consentAt: 0 }];
+  const cars: Record<string, ReturnType<typeof car>> = { user_ana: car('car-ana'), user_ben: car('car-ben') };
+  const api = bookingApi(schedule, { list: async (id) => cars[id] ?? [] }, { mode: () => 'demo', claim: async () => 'x', release: async () => {} });
+  let skew = 0;
+  const voice = createVoice({
+    now: () => Date.now() + skew,
+    service: {
+      bays: api.bays,
+      quote: api.quote,
+      book: (userId, slot) => api.reserve(userId, { ...slot, acceptFees: true, payment: 'demo' }),
+      vehicle: async (userId) => cars[userId]?.[0] ?? null,
+    },
+  });
+  const cfg: VoiceConfig = { enabled: true, secret: SECRET };
+  const tool = async (name: string, args: unknown, account: string, callId = `call-${account}`) => {
+    const voiceToken = signVoiceToken(account, SECRET, Date.now())!.token;
+    const res = (await voice.handle(
+      { message: { type: 'tool-calls', timestamp: Date.now(), call: { id: callId, assistantOverrides: { metadata: { voiceToken } } }, toolCallList: [{ id: 't', function: { name, arguments: args } }] } },
+      cfg,
+    )) as { results: { result: string }[] };
+    return JSON.parse(res.results[0].result);
+  };
+  const upcoming = async (userId: string) => (await schedule.bookingsOf(userId)).upcoming;
+
+  const q = await tool('quote_reservation', tomorrow, 'user_ana');
+  assert.equal(q.status, 'available', JSON.stringify(q));
+  assert.equal((await upcoming('user_ana')).length, 0, 'a quote alone creates nothing');
+
+  const [a, b] = await Promise.all([tool('confirm_reservation', { quoteId: q.quoteId }, 'user_ana'), tool('confirm_reservation', { quoteId: q.quoteId }, 'user_ana')]);
+  assert.equal(a.status, 'confirmed', JSON.stringify(a));
+  assert.equal(a.bookingId, b.bookingId);
+  const mine = await upcoming('user_ana');
+  assert.equal(mine.length, 1, 'repeated confirm, one booking');
+  assert.deepEqual([mine[0].id, mine[0].bayId, mine[0].blocks, mine[0].feeCents], [a.bookingId, 'bw-1', 3, a.priceCents]);
+  assert.equal(new Date(mine[0].start).toISOString(), new Date(a.start).toISOString(), 'the future slot that was read back');
+  assert.equal((await upcoming('user_ben')).length, 0, 'under the token’s driver only');
+
+  // Ben, same time: bw-1 is taken, so "Baywatch" gets bw-2, and "Baywatch Bay 1" offers free alternatives
+  assert.equal((await tool('quote_reservation', tomorrow, 'user_ben')).station.name, 'Baywatch Bay 2');
+  const taken = await tool('quote_reservation', { ...tomorrow, place: 'Baywatch Bay 1' }, 'user_ben');
+  assert.equal(taken.status, 'unavailable');
+  assert.ok(taken.alternatives.length >= 1 && taken.alternatives.length <= 2);
+  for (const alt of taken.alternatives) assert.equal((await tool('quote_reservation', alt, 'user_ben')).status, 'available', JSON.stringify(alt));
+
+  // a quote someone else books first can't be confirmed; neither can an expired one
+  const later = { ...tomorrow, place: 'Baywatch Bay 2', time: '17:00' };
+  const stale = await tool('quote_reservation', later, 'user_ben');
+  await api.reserve('user_ana', { bayId: 'bw-2', start: Date.parse(stale.start), blocks: 3, priceCents: stale.priceCents, acceptFees: true, payment: 'demo' });
+  assert.equal((await tool('confirm_reservation', { quoteId: stale.quoteId }, 'user_ben')).status, 'unavailable');
+  const old = await tool('quote_reservation', { ...later, time: '19:30' }, 'user_ben');
+  skew = 6 * MIN;
+  assert.equal((await tool('confirm_reservation', { quoteId: old.quoteId }, 'user_ben')).status, 'expired');
+  assert.equal((await upcoming('user_ben')).length, 0);
 });

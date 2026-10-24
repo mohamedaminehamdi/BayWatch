@@ -11,8 +11,9 @@ import type { Vehicle } from './vehicles.ts';
 
 export type BookingRequest = {
   bayId: string;
-  start: number;
-  blocks: number;
+  start?: number;
+  blocks?: number;
+  now?: true; // "Book now": from the block under way, for at least an hour from this moment (start and blocks unused)
   vehicleId?: string; // one of the driver's cars; omitted: their first car
   priceCents: number; // the price the driver accepted: a different one now is a 409
   acceptFees: true;
@@ -40,7 +41,9 @@ export function bookingApi(schedule: Schedule, vehicles: { list(userId: string):
       bayId,
       start: input.start,
       blocks: input.blocks,
+      now: input.now === true,
       plate: car.plate,
+      cameraPlate: car.cameraPlate,
       vehicleLabel: car.label,
       expectedCents: input.priceCents,
       ...(paymentIntentId && { paymentIntentId }),
@@ -52,11 +55,24 @@ export function bookingApi(schedule: Schedule, vehicles: { list(userId: string):
     bays: (): Pick<Bay, 'id' | 'name' | 'address' | 'class'>[] => schedule.realBays().map(({ id, name, address, class: c }) => ({ id, name, address, class: c })),
 
     // The grid, the class's length, the 60-day horizon, overlaps with the 10-min gap and the 3-booking limit;
-    // no hardware and no Clerk round trip (the credit counts once the driver's wallet is loaded)
-    quote(bayId: string, start: number, blocks: number, userId: string): { cents: number; valid: boolean; reason?: string; creditAppliedCents?: number } {
+    // no hardware and no Clerk round trip (the credit counts once the driver's wallet is loaded). start 'now':
+    // "Book now", from the block under way for at least an hour (blocks unused); start and end say what that is.
+    quote(
+      bayId: string,
+      start: number | 'now',
+      blocks: number,
+      userId: string,
+    ): { cents: number; valid: boolean; reason?: string; creditAppliedCents?: number; start?: number; end?: number } {
       if (!schedule.bay(bayId)) return { cents: 0, valid: false, reason: 'Unknown bay' };
       const q = schedule.quoteNow(userId, bayId, start, blocks);
-      return { cents: q.cents, valid: q.valid, ...(q.reason && { reason: q.reason }), ...(q.creditKnown && { creditAppliedCents: q.creditAppliedCents }) };
+      return {
+        cents: q.cents,
+        valid: q.valid,
+        start: q.start,
+        end: q.end,
+        ...(q.reason && { reason: q.reason }),
+        ...(q.creditKnown && { creditAppliedCents: q.creditAppliedCents }),
+      };
     },
 
     // Voice: the demo payment charges nobody, so it's taken only with VOICE_DEMO=1 or on a server without Stripe
@@ -71,7 +87,7 @@ export function bookingApi(schedule: Schedule, vehicles: { list(userId: string):
     async reserveFromWeb(userId: string, input: Record<string, unknown>): Promise<ReservationView> {
       if (payments.mode() === 'demo') return book(userId, input);
       const bayId = typeof input.bayId === 'string' ? input.bayId : fail(400, 'Choose a bay');
-      const q = await schedule.quoteSlot(userId, bayId, Number(input.start), Number(input.blocks));
+      const q = await schedule.quoteSlot(userId, bayId, input.now === true ? 'now' : Number(input.start), Number(input.blocks));
       if (q.payCents === 0 || !q.valid) return book(userId, input); // all on credit, or refused before any card is touched
       const hold = await payments.claim(input.paymentIntentId, { userId, cents: q.payCents });
       try {

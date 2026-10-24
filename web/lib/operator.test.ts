@@ -95,7 +95,7 @@ test('revenue is what drivers paid under the booking rules: a no-show, a late ca
     await r.tick();
   };
   const book = (who: string, start: number) => r.reserve(who, { bayId: 'bw-3', start, blocks: 2, plate: 'MAB1234', vehicleLabel: 'Car' });
-  await book('user_a', t + H); // 11:00, missed: the whole €2.50
+  await book('user_a', t + H); // 11:00, missed: the whole €5
   await tick(H + 16 * MIN);
   const late = await book('user_b', t + 44 * MIN); // 12:00, cancelled 20 min before: 50%
   await tick(24 * MIN);
@@ -105,11 +105,11 @@ test('revenue is what drivers paid under the booking rules: a no-show, a late ca
   await r.plateEvent('bw-3', 'MAB1234');
   await tick(45 * MIN);
   await r.vacated('bw-3');
-  assert.equal(r.get('user_c', kept.id).totalCents, 250 + 5 * 30);
+  assert.equal(r.get('user_c', kept.id).totalCents, 500 + 5 * 30);
   const walk = await r.unlock('user_d', 'bw-3', { lat: 52.52, lng: 13.4052 });
   t = walk.end + 7 * MIN;
   await r.vacated('bw-3');
-  assert.equal(weekStats(r.analytics().records, [], t).kpis.revenueCents, 250 + 125 + 400 + 60);
+  assert.equal(weekStats(r.analytics().records, [], t).kpis.revenueCents, 500 + 250 + 650 + 60);
 });
 
 test('a simulated week is repeatable, inside the week, never in the future, never overlapping, and priced by the rules', () => {

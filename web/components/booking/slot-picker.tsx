@@ -3,22 +3,23 @@
 import { Minus, Plus } from 'lucide-react';
 import { formatTime } from '@/components/time';
 import { inputClass } from '@/components/ui/field';
+import { BLOCK_MS, CLASSES, HORIZON_MS, TZ } from '@/lib/booking-rules';
+import type { BayClass, BlockState } from '@/lib/booking-types';
 
 // Picking a slot: a date (today up to 60 days ahead), a start block on that day's grid of 96 quarter
 // hours (Europe/Berlin), and a length in blocks. The server re-checks all of it when quoting and booking.
 
-export type BlockState = 'free' | 'booked' | 'gap' | 'past' | 'mine';
-export type Block = { start: number; state: BlockState };
-
-export const BLOCK_MS = 15 * 60_000;
-export const HORIZON_DAYS = 60;
+const HORIZON_DAYS = Math.floor(HORIZON_MS / 86_400_000);
 
 // "1 h 15 min": lengths read as durations, never as a time of day
 export const formatLength = (minutes: number) =>
   minutes < 60 ? `${minutes} min` : `${Math.floor(minutes / 60)} h${minutes % 60 ? ` ${minutes % 60} min` : ''}`;
 
+// "Book now" books an hour, or the class maximum if that's shorter
+export const quickLength = (cls: BayClass) => Math.min(4, CLASSES[cls].maxBlocks);
+
 // Dates are YYYY-MM-DD in Europe/Berlin, the grid's time zone; noon UTC keeps day arithmetic clear of DST
-export const berlinDate = (ms: number) => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Berlin' }).format(ms);
+export const berlinDate = (ms: number) => new Intl.DateTimeFormat('en-CA', { timeZone: TZ }).format(ms);
 export function addDays(date: string, n: number) {
   const d = new Date(`${date}T12:00:00Z`);
   d.setUTCDate(d.getUTCDate() + n);
@@ -27,8 +28,12 @@ export function addDays(date: string, n: number) {
 export const dayLabel = (date: string) =>
   new Date(`${date}T12:00:00Z`).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', timeZone: 'UTC' });
 
+// A block as the timeline draws it: the server's state, or 'occupied' when a car without a booking stands in the
+// bay, so the guard can't rise for a start that close (the booking flow works that out)
+export type Cell = { start: number; state: BlockState | 'occupied' };
+
 // Free blocks in a row from index i: the longest booking that can start there
-export function freeRun(blocks: Block[], i: number) {
+export function freeRun(blocks: Cell[], i: number) {
   let n = 0;
   while (blocks[i + n]?.state === 'free') n++;
   return n;
@@ -68,24 +73,26 @@ export function DatePicker({ value, today, onChange }: { value: string; today: s
   );
 }
 
-const WORD: Record<Exclude<BlockState, 'free'>, string> = { booked: 'Booked', gap: 'Gap', past: 'Past', mine: 'Yours' };
+type Taken = Exclude<Cell['state'], 'free'>;
+const WORD: Record<Taken, string> = { booked: 'Booked', gap: 'Gap', past: 'Past', mine: 'Yours', occupied: 'Occupied' };
 const CELL = 'flex min-h-11 flex-col items-center justify-center rounded-lg font-mono text-[0.6875rem] leading-tight';
-const LOOK: Record<Exclude<BlockState, 'free'>, string> = {
+const LOOK: Record<Taken, string> = {
   // hatched: taken by someone else, and visibly not a button
   booked: 'bg-[repeating-linear-gradient(135deg,var(--color-sunken)_0_6px,var(--color-line)_6px_8px)] text-muted',
   gap: 'bg-sunken text-faint',
   past: 'text-faint opacity-60',
   mine: 'bg-accent-tint text-accent ring-1 ring-inset ring-accent/30',
+  occupied: 'bg-warn-tint text-warn',
 };
 
 // Free blocks are radios sharing one name: a single Tab enters the day, arrow keys move between free blocks
-export function DayTimeline({ blocks, start, length, onPick }: { blocks: Block[]; start: number | null; length: number; onPick: (start: number) => void }) {
-  const rows: Block[][] = [];
+export function DayTimeline({ blocks, start, length, onPick }: { blocks: Cell[]; start: number | null; length: number; onPick: (start: number) => void }) {
+  const rows: Cell[][] = [];
   for (let h = 0; h < blocks.length / 4; h++) {
     const row = blocks.slice(h * 4, h * 4 + 4);
     if (row.some((b) => b.state !== 'past')) rows.push(row); // hours that are entirely over are left out
   }
-  const inRange = (b: Block) => start !== null && b.start >= start && b.start < start + length * BLOCK_MS;
+  const inRange = (b: Cell) => start !== null && b.start >= start && b.start < start + length * BLOCK_MS;
 
   if (!rows.length) return <p className="rounded-2xl bg-sunken p-4 text-muted">This day is over. Pick another date.</p>;
 

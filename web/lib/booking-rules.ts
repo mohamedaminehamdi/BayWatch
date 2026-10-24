@@ -11,7 +11,7 @@ const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;
 
 // Shared by v1 and v2
-export const MAX_RESERVATION_CENTS = 400; // hard cap: a mentor called €5 too much
+export const MAX_RESERVATION_CENTS = 1000; // team decision 2026-10-24: €5 standard reservation, cap €10 (2× the base)
 export const FREE_CANCEL_MS = 2 * MINUTE; // misclicks
 export const ARRIVAL_GRACE_MS = 15 * MINUTE;
 export const OVERSTAY_CAP_CENTS = 1200; // EnBW's cap per charging session
@@ -34,7 +34,7 @@ export const IDLE_GRACE_MS = 5 * MINUTE; // free minutes after the end
 export const IDLE_CENTS_PER_MIN = 30;
 export const BLOCKED_CREDIT_CENTS = 500; // for the driver whose bay was blocked, once per booking
 export const OVERSTAY_OPERATOR_SHARE = 0.5; // of idle fees; the platform keeps the rest
-const BASE_FEE_CENTS = 250;
+const BASE_FEE_CENTS = 500; // team decision 2026-10-24: €5 standard reservation, cap €10
 
 // By the bay's highest power: < 50 kW slow, 50–299 kW fast, 300 kW and up ultra
 export const CLASSES: Record<BayClass, { label: string; maxBlocks: number; percent: number }> = {
@@ -78,7 +78,7 @@ export function demandAt(start: number, { override, holidays = [] }: { override?
   return 'normal';
 }
 
-// Fixed at booking: €2.50 × class × demand, never more than €4. Integer percentages, so no float drift.
+// Fixed at booking: €5 × class × demand, never more than €10. Integer percentages, so no float drift.
 export function bookingFee(cls: BayClass, level: DemandLevel) {
   const percent = (CLASSES[cls].percent * DEMAND[level].percent) / 100;
   return { cents: Math.min(percentOf(BASE_FEE_CENTS, percent), MAX_RESERVATION_CENTS), demand: DEMAND[level].label, multiplier: percent / 100 };
@@ -88,13 +88,21 @@ export function bookingFee(cls: BayClass, level: DemandLevel) {
 export const blockStart = (t: number) => t - (((t % BLOCK_MS) + BLOCK_MS) % BLOCK_MS);
 export const earliestStart = (now: number) => (now - blockStart(now) < CURRENT_BLOCK_MS ? blockStart(now) : blockStart(now) + BLOCK_MS);
 
+// "Book now": from the start of the block under way, for at least an hour from this moment (16:23 → 16:15–17:30),
+// or the class maximum if that's shorter
+export function nowSlot(cls: BayClass, now: number) {
+  const start = blockStart(now);
+  return { start, blocks: Math.min(Math.ceil((now + HOUR - start) / BLOCK_MS), CLASSES[cls].maxBlocks) };
+}
+
 // Why a slot can't be booked, or null. Overlaps and the per-driver limit need the schedule: see schedule.ts.
-export function slotProblem(cls: BayClass, start: number, blocks: number, now: number): string | null {
+// `earliest`: "Book now" may start in the block under way, however far into it
+export function slotProblem(cls: BayClass, start: number, blocks: number, now: number, earliest = earliestStart(now)): string | null {
   const { label, maxBlocks } = CLASSES[cls];
   if (!Number.isInteger(blocks) || blocks < 1) return 'Book at least one 15-minute block';
   if (blocks > maxBlocks) return `${label} bays take bookings of up to ${maxBlocks / 4} h`;
   if (!Number.isFinite(start) || start % BLOCK_MS !== 0) return 'Start on the quarter hour: :00, :15, :30 or :45';
-  if (start < earliestStart(now)) return 'This slot has already started';
+  if (start < earliest) return 'This slot has already started';
   if (start - now > HORIZON_MS) return `Book at most ${HORIZON_MS / DAY} days ahead`;
   return null;
 }
@@ -172,7 +180,7 @@ export type ReservationType = 'fast' | 'slow';
 // operators already charge: AC 15 min × €0.10 (EnBW, EWE Go) = €1.50, today's price; DC 15 min ×
 // €0.15–0.246 (Aral, Allego) = €2.25–3.69, so €2.50, close to EVgo's $3. Overstay uses the same rates.
 export const TYPES = {
-  fast: { label: 'Fast (DC)', maxMs: 2 * HOUR, baseCents: 250, overstayCentsPerMin: 25 },
+  fast: { label: 'Fast (DC)', maxMs: 2 * HOUR, baseCents: 500, overstayCentsPerMin: 25 }, // team decision 2026-10-24: €5
   slow: { label: 'Slow (AC)', maxMs: 4 * HOUR, baseCents: 150, overstayCentsPerMin: 10 },
 };
 

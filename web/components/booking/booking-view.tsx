@@ -1,91 +1,148 @@
 'use client';
 
-import { BellRing, CarFront, CircleCheck, Clock, MapPin, Navigation, PlugZap, ScanLine, Timer, TriangleAlert, X } from 'lucide-react';
+import { BellRing, CarFront, CircleCheck, Clock, Construction, FlaskConical, MapPin, Navigation, PlugZap, ScanLine, TriangleAlert, X } from 'lucide-react';
 import Link from 'next/link';
-import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
+import { useRouter } from 'next/navigation';
+import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { api } from '@/components/api';
 import { useAppState } from '@/components/app/app-state';
+import { hardwareNote } from '@/components/explore/panels';
 import { formatCountdown, formatTime, useNow } from '@/components/time';
 import { Button, buttonClass, chipClass } from '@/components/ui/button';
 import { Dialog } from '@/components/ui/dialog';
 import { EmptyState } from '@/components/ui/empty-state';
 import { Field, inputClass } from '@/components/ui/field';
 import { PlateBadge } from '@/components/ui/plate-badge';
-import { directionsUrl, distanceM, formatDistance } from '@/lib/geo';
-import { formatLength } from '@/components/explore/reserve-dialog';
-import type { Charger } from '@/lib/goingelectric';
-import { cancellationFee, OVERSTAY_CAP_CENTS, OVERSTAY_GRACE_MS, TYPES } from '@/lib/booking-rules';
-import { EXTENSION_MIN, formatEuro, FREE_CANCEL_MS, PRICES } from '@/lib/pricing';
-import type { ReservationView } from '@/lib/reservation';
-import type { AppState } from '@/lib/server';
+import type { Bay, BayDetail, BookingsResponse, ReminderKey, ReservationView } from '@/lib/booking-types';
+import { IDLE_CENTS_PER_MIN, IDLE_GRACE_MS, OVERSTAY_CAP_CENTS } from '@/lib/booking-rules';
+import { directionsUrl } from '@/lib/geo';
+import { formatEuro } from '@/lib/pricing';
+import type { Vehicle } from '@/lib/vehicles';
+import { AlternativeList } from './alternatives';
+import { barrierNote, BookingFlow } from './booking-flow';
+import { CancelSchedule } from './cancel-schedule';
 import { Receipt } from './receipt';
+import { formatLength } from './slot-picker';
 import { StatusStepper } from './status-stepper';
 
+const MIN = 60_000;
+const ENDED = new Set(['completed', 'cancelled', 'no_show']);
+const duration = (ms: number) => formatLength(Math.max(1, Math.round(ms / MIN)));
 const elapsed = (ms: number) => {
   const s = Math.max(0, Math.floor(ms / 1000));
   const h = Math.floor(s / 3600);
   const m = Math.floor((s % 3600) / 60);
   return `${h ? `${h}:${String(m).padStart(2, '0')}` : m}:${String(s % 60).padStart(2, '0')}`;
 };
-// "1 h 5 min" rather than "1:05:00", which reads like a time of day next to 24-hour clock times
-const MIN = 60_000;
-const duration = (ms: number) => formatLength(Math.max(1, Math.round(ms / MIN)));
+const day = (at: number, now: number) =>
+  new Date(at).toDateString() === new Date(now).toDateString() ? 'Today' : new Date(at).toLocaleDateString([], { weekday: 'short', day: 'numeric', month: 'short' });
+
+// What cancelling costs right now, as a share of the fee (the step of the schedule we're in)
+const cancelPercent = (r: ReservationView, now: number) => [...r.cancelSchedule].reverse().find((s) => s.from <= now)?.percent ?? 0;
+
+const REMINDER: Record<ReminderKey, (r: ReservationView, now: number) => string> = {
+  day_before: (r, now) => `Tomorrow at ${formatTime(r.start)}: ${r.bayName}. Cancelling now costs ${cancelPercent(r, now)}% of the fee.`,
+  live: (r, now) => `Your booking is live: the bay is held for you from ${formatTime(r.start)}. Cancelling now costs ${cancelPercent(r, now)}%.`,
+  five_before: (r, now) => `Starts in 5 minutes. Cancelling now costs ${cancelPercent(r, now)}%.`,
+  five_left: (r) => `5 minutes left in your slot. It ends at ${formatTime(r.end)}.`,
+  slot_over: (r) => `Your slot is over. You have ${IDLE_GRACE_MS / MIN} free minutes to leave, until ${formatTime(r.end + IDLE_GRACE_MS)}.`,
+  idle_fee: () => `Idle fee now: ${formatEuro(IDLE_CENTS_PER_MIN)} a minute, up to ${formatEuro(OVERSTAY_CAP_CENTS)}. Please move the car.`,
+};
 
 function Banner({ tone, icon: Icon, children }: { tone: 'info' | 'warn'; icon: typeof Clock; children: ReactNode }) {
   return (
     <div role="status" className={`flex gap-3 rounded-2xl p-4 text-ink ${tone === 'warn' ? 'bg-warn-tint' : 'bg-accent-tint'}`}>
-      <Icon className={`mt-0.5 size-5 shrink-0 ${tone === 'warn' ? 'text-warn' : 'text-accent'}`} />
+      <Icon aria-hidden className={`mt-0.5 size-5 shrink-0 ${tone === 'warn' ? 'text-warn' : 'text-accent'}`} />
       <div className="font-medium">{children}</div>
     </div>
   );
 }
 
-export function BookingView() {
-  const { state, refresh } = useAppState();
+// /booking: straight to the booking that matters now (active, else the next one)
+export function ActiveBookingRedirect() {
+  const router = useRouter();
+  const [none, setNone] = useState(false);
+  useEffect(() => {
+    api<BookingsResponse>('GET', '/api/bookings?v=2').then(
+      (b) => {
+        const r = b.active ?? b.upcoming[0];
+        if (r) router.replace(`/booking/${encodeURIComponent(r.id)}`);
+        else setNone(true);
+      },
+      () => setNone(true),
+    );
+  }, [router]);
+  if (!none) return <div className="mx-auto mt-10 h-96 w-full max-w-2xl animate-pulse rounded-3xl bg-sunken" />;
+  return (
+    <div className="mx-auto w-full max-w-2xl px-5 py-10">
+      <EmptyState
+        icon={MapPin}
+        title="No booking right now"
+        action={
+          <Link href="/explore" className={buttonClass('primary', 'lg')}>
+            Find a charger
+          </Link>
+        }
+      >
+        Book any charger and its bay is held free for you while you drive there.
+      </EmptyState>
+    </div>
+  );
+}
+
+export function BookingScreen({ id }: { id: string }) {
+  const { refresh: refreshShell } = useAppState();
   const now = useNow();
+  const [r, setR] = useState<ReservationView | null>(null);
+  const [bay, setBay] = useState<BayDetail | null>(null);
+  const [missing, setMissing] = useState('');
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState('');
   const [dialog, setDialog] = useState<null | 'cancel' | 'other-car'>(null);
+  const [bookInstead, setBookInstead] = useState<Bay | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      setR(await api<ReservationView>('GET', `/api/reservations/${encodeURIComponent(id)}`));
+    } catch (e) {
+      setMissing((e as Error).message);
+    }
+  }, [id]);
+
+  // poll while the booking is still moving; the server changes states on its own (live, no-show, blocked)
+  useEffect(() => {
+    const tick = () => document.visibilityState === 'visible' && load();
+    const t = setInterval(tick, 3000);
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- first load; state is only set after the fetch resolves
+    load();
+    return () => clearInterval(t);
+  }, [load]);
+
+  const bayId = r?.bayId;
+  useEffect(() => {
+    if (!bayId) return;
+    api<BayDetail>('GET', `/api/bays/${encodeURIComponent(bayId)}`).then(setBay, () => {});
+  }, [bayId]);
 
   async function act(key: string, fn: () => Promise<unknown>) {
     setBusy(key);
     setError('');
     try {
       await fn();
-      await refresh();
+      await Promise.all([load(), refreshShell()]);
       setDialog(null);
     } catch (e) {
       setError((e as Error).message);
     }
     setBusy(null);
   }
+  const post = (action: string, body?: unknown) => () => api('POST', `/api/reservations/${encodeURIComponent(id)}/${action}`, body);
 
-  if (!state) return <div className="mx-auto mt-10 h-96 w-full max-w-2xl animate-pulse rounded-3xl bg-sunken" />;
-  const r = state.reservation?.mine ? state.reservation : null;
-  if (!r)
-    return (
-      <div className="mx-auto w-full max-w-2xl px-5 py-10">
-        <EmptyState
-          icon={MapPin}
-          title="No booking right now"
-          action={
-            <Link href="/explore?bay" className={buttonClass('primary', 'lg')}>
-              Find the bay
-            </Link>
-          }
-        >
-          Book a Baywatch bay and it’s held free for you while you drive there.
-        </EmptyState>
-      </div>
-    );
-
-  const step = (key: string, action: string, body?: unknown) => act(key, () => api('POST', `/api/reservation/${action}`, body));
-
-  function checkInHere() {
+  function checkIn() {
     if (!navigator.geolocation) return setError('Your browser can’t share its location.');
     setBusy('checkin');
     navigator.geolocation.getCurrentPosition(
-      (p) => step('checkin', 'checkin', { lat: p.coords.latitude, lng: p.coords.longitude }),
+      (p) => act('checkin', post('checkin', { lat: p.coords.latitude, lng: p.coords.longitude })),
       () => {
         setBusy(null);
         setError('Allow location access so we can confirm you’re at the bay.');
@@ -94,113 +151,130 @@ export function BookingView() {
     );
   }
 
-  const ended = !['reserved', 'arrived', 'charging'].includes(r.status);
+  if (missing && !r)
+    return (
+      <div className="mx-auto w-full max-w-2xl px-5 py-10">
+        <EmptyState icon={MapPin} title="Booking not found" action={<Link href="/bookings" className={buttonClass('primary', 'lg')}>All bookings</Link>}>
+          {missing}
+        </EmptyState>
+      </div>
+    );
+  if (!r || !now) return <div className="mx-auto mt-10 h-96 w-full max-w-2xl animate-pulse rounded-3xl bg-sunken" />;
+
+  const ended = ENDED.has(r.status);
+  const canChangeCar = (r.status === 'upcoming' || r.status === 'live') && !r.blockedSince;
+  const reminder = r.sentReminders.at(-1);
 
   return (
     <div className="mx-auto w-full max-w-2xl px-5 py-6 sm:py-10">
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
-          <p className="font-mono text-xs font-medium uppercase tracking-[0.12em] text-muted">Your booking</p>
-          <h1 className="mt-1 font-display text-4xl leading-[0.95] tracking-[0.012em]">
-            {state.viewer?.active?.bayName ?? state.viewer?.next?.bayName ?? state.bay.name}
-          </h1>
-          <p className="text-muted">
-            {state.bay.address} · {state.bay.powerKw} kW
+          <p className="font-mono text-xs font-medium uppercase tracking-[0.12em] text-muted">{r.status === 'walkup' ? 'Walk-up session' : 'Your booking'}</p>
+          <h1 className="mt-1 font-display text-4xl leading-[0.95] tracking-[0.012em]">{r.bayName}</h1>
+          <p className="mt-1 font-mono text-sm uppercase tracking-[0.06em] text-muted">
+            {day(r.start, now)} · {formatTime(r.start)}–{formatTime(r.end)} · {duration(r.end - r.start)}
           </p>
         </div>
-        {!ended && (
-          <a href={directionsUrl(state.bay)} target="_blank" rel="noopener" className={buttonClass('secondary', 'md')}>
-            <Navigation className="size-4" /> Navigate by car
+        {!ended && bay && (
+          <a href={directionsUrl(bay)} target="_blank" rel="noopener" className={buttonClass('secondary', 'md')}>
+            <Navigation aria-hidden className="size-4" /> Navigate by car
           </a>
         )}
       </div>
 
-      {(r.status !== 'cancelled' && r.status !== 'no_show') && (
+      {/* bw-1 and bw-2 are real locks: say so, since the booking really moves the barrier */}
+      {r.guard === 'hardware' ? (
+        !ended && (
+          <p className="mt-4 flex gap-2.5">
+            <Construction aria-hidden className="mt-0.5 size-5 shrink-0 text-accent" />
+            <span>
+              <span className="font-semibold">This raises the real barrier at the bay.</span>
+              {(r.status === 'upcoming' || r.status === 'live') && !r.blockedSince && ` ${barrierNote(r.start, now)}`}
+            </span>
+          </p>
+        )
+      ) : (
+        <p className={`${chipClass} mt-4 bg-accent-tint text-accent`}>
+          <FlaskConical aria-hidden className="size-3.5" />
+          {hardwareNote({ guard: r.guard, real: r.real } as Bay)}
+        </p>
+      )}
+
+      {r.status !== 'cancelled' && r.status !== 'no_show' && r.status !== 'walkup' && (
         <div className="mt-6">
           <StatusStepper status={r.status} />
         </div>
       )}
 
       <div aria-live="polite" className="mt-6 grid gap-4">
-        {r.status === 'reserved' && !r.blockedSince && (
-          <Reserved r={r} state={state} now={now} busy={busy} onStep={step} onCheckIn={checkInHere} onDialog={setDialog} />
+        {reminder && !ended && (
+          <Banner tone={reminder.key === 'idle_fee' || reminder.key === 'slot_over' || reminder.key === 'five_before' ? 'warn' : 'info'} icon={BellRing}>
+            {REMINDER[reminder.key](r, now)}
+          </Banner>
         )}
-        {r.status === 'reserved' && r.blockedSince && <Blocked r={r} state={state} busy={busy} onCancel={() => step('cancel', 'cancel')} />}
-        {r.status === 'arrived' && <Arrived r={r} state={state} now={now} busy={busy} onCharge={() => step('charge', 'charge')} />}
-        {r.status === 'charging' && <Charging r={r} state={state} now={now} busy={busy} onFinish={() => step('finish', 'finish')} />}
-        {ended && <Done r={r} />}
+        <ReminderNotification r={r} now={now} />
+
+        {r.blockedSince && !ended ? (
+          <Blocked r={r} from={bay} busy={busy} onCancel={() => act('cancel', post('cancel'))} onBookInstead={setBookInstead} />
+        ) : r.status === 'upcoming' ? (
+          <Upcoming r={r} now={now} />
+        ) : r.status === 'live' ? (
+          <Live r={r} now={now} busy={busy} onCheckIn={checkIn} />
+        ) : r.status === 'arrived' ? (
+          <Arrived r={r} busy={busy} onCharge={() => act('charge', post('charge'))} />
+        ) : r.status === 'charging' || r.status === 'walkup' ? (
+          <Session r={r} now={now} busy={busy} onFinish={() => act('finish', post('finish'))} />
+        ) : (
+          <Done r={r} />
+        )}
+
+        {!ended && !r.blockedSince && <Facts r={r} now={now} />}
+
+        {!ended && (canChangeCar || r.cancelNowCents !== null) && (
+          <div className="grid gap-3 sm:grid-cols-2">
+            {canChangeCar && (
+              <Button variant="secondary" size="lg" onClick={() => setDialog('other-car')}>
+                <CarFront aria-hidden className="size-5" /> Different car today
+              </Button>
+            )}
+            {r.cancelNowCents !== null && !r.blockedSince && (
+              <Button variant="ghost" size="lg" onClick={() => setDialog('cancel')}>
+                <X aria-hidden className="size-5" /> Cancel booking
+              </Button>
+            )}
+          </div>
+        )}
+        {!ended && <NotifyMe />}
 
         {error && (
           <p role="alert" className="flex gap-2 rounded-2xl bg-danger-tint p-4 text-danger">
-            <TriangleAlert className="mt-0.5 size-5 shrink-0" /> {error}
+            <TriangleAlert aria-hidden className="mt-0.5 size-5 shrink-0" /> {error}
           </p>
         )}
       </div>
 
-      <CancelDialog
-        open={dialog === 'cancel'}
-        r={r}
-        now={now}
-        busy={busy === 'cancel'}
-        onClose={() => setDialog(null)}
-        onConfirm={() => step('cancel', 'cancel')}
-      />
+      <CancelDialog open={dialog === 'cancel'} r={r} busy={busy === 'cancel'} onClose={() => setDialog(null)} onConfirm={() => act('cancel', post('cancel'))} />
       <OtherCarDialog
         open={dialog === 'other-car'}
-        busy={busy === 'other-plate'}
+        busy={busy === 'plate'}
         onClose={() => setDialog(null)}
-        onSubmit={(plate) => step('other-plate', 'other-plate', { plate, consent: true })}
+        onSubmit={(body) => act('plate', post('plate', body))}
       />
+      <BookingFlow bay={bookInstead} onClose={() => setBookInstead(null)} />
     </div>
   );
 }
 
-// The session's times and fee, shown on every live booking screen
-function SessionFacts({ r, now, cancelling }: { r: ReservationView; now: number; cancelling?: boolean }) {
-  const t = TYPES[r.type ?? 'fast'];
-  const freeLeft = (r.createdAt ?? 0) + FREE_CANCEL_MS - now;
-  const cancelNow = r.blockedSince ? 0 : cancellationFee(r.feeCents ?? 0, { bookedAt: r.createdAt ?? 0, start: r.start ?? 0, cancelledAt: now });
-  const rows: [string, string][] = [
-    ['Session', `${formatTime(r.start ?? 0)}–${formatTime(r.end)} · ${t.label}`],
-    ['Leave by', `${formatTime(r.end + OVERSTAY_GRACE_MS)}, then ${formatEuro(t.overstayCentsPerMin)}/min (max ${formatEuro(OVERSTAY_CAP_CENTS)})`],
-    ['Fee', `${formatEuro(r.feeCents ?? 0)} · ${(r.demand ?? 'normal').toLowerCase()} demand${r.prepaid ? ' · prepaid' : ''}`],
-  ];
-  if (cancelling) rows.push(['Cancelling now', cancelNow === 0 ? (r.blockedSince ? 'free, the bay is blocked' : `free for another ${formatCountdown(freeLeft)}`) : `costs ${formatEuro(cancelNow)}`]);
-  return (
-    <dl className="grid gap-x-6 gap-y-3 border-t border-line pt-5 first:border-t-0 first:pt-0 sm:grid-cols-2">
-      {rows.map(([k, v]) => (
-        <div key={k}>
-          <dt className="font-mono text-xs font-medium uppercase tracking-[0.1em] text-muted">{k}</dt>
-          <dd className="mt-0.5 font-semibold">{v}</dd>
-        </div>
-      ))}
-    </dl>
-  );
-}
-
-const REMINDER_TEXT = {
-  ends_in_1h: (r: ReservationView) => `Your session ends at ${formatTime(r.end)}. Please leave the bay by ${formatTime(r.end + OVERSTAY_GRACE_MS)}.`,
-  ends_in_15m: (r: ReservationView) =>
-    `15 minutes left. From ${formatTime(r.end + OVERSTAY_GRACE_MS)}, idle time costs ${formatEuro(TYPES[r.type ?? 'fast'].overstayCentsPerMin)} a minute.`,
-};
-
-// End-of-session reminders sent by the server: an in-app banner, plus a browser notification if allowed
-function SessionReminder({ r, bayName }: { r: ReservationView; bayName: string }) {
+// The latest server reminder as a browser notification too, once, if the driver allowed them
+function ReminderNotification({ r, now }: { r: ReservationView; now: number }) {
   const shown = useRef(new Set<string>());
-  const last = r.sentReminders?.filter((s) => s.key in REMINDER_TEXT).at(-1);
+  const last = r.sentReminders.at(-1);
   useEffect(() => {
-    if (!last || shown.current.has(last.key)) return;
+    if (!last || shown.current.has(last.key) || !('Notification' in window) || Notification.permission !== 'granted') return;
     shown.current.add(last.key);
-    if ('Notification' in window && Notification.permission === 'granted') {
-      new Notification(bayName, { body: REMINDER_TEXT[last.key as keyof typeof REMINDER_TEXT](r) });
-    }
-  }, [last, bayName, r]);
-  if (!last) return null;
-  return (
-    <Banner tone="warn" icon={BellRing}>
-      {REMINDER_TEXT[last.key as keyof typeof REMINDER_TEXT](r)}
-    </Banner>
-  );
+    new Notification(r.bayName, { body: REMINDER[last.key](r, now) });
+  }, [last, r, now]);
+  return null;
 }
 
 function NotifyMe() {
@@ -213,28 +287,73 @@ function NotifyMe() {
       onClick={() => Notification.requestPermission().then(() => setAsk(false))}
       className="inline-flex min-h-11 items-center justify-self-start text-sm font-semibold text-accent underline underline-offset-2"
     >
-      Get a notification before your session ends
+      Get notifications for this booking
     </button>
   );
 }
 
-function Reserved({
-  r,
-  state,
-  now,
-  busy,
-  onStep,
-  onCheckIn,
-  onDialog,
-}: {
-  r: ReservationView;
-  state: AppState;
-  now: number;
-  busy: string | null;
-  onStep: (key: string, action: string) => void;
-  onCheckIn: () => void;
-  onDialog: (d: 'cancel' | 'other-car') => void;
-}) {
+// The session's times and money, on every live booking screen
+function Facts({ r, now }: { r: ReservationView; now: number }) {
+  const rows: [string, string][] = [
+    ['Session', `${formatTime(r.start)}–${formatTime(r.end)} · ${duration(r.end - r.start)}`],
+    ...(r.status === 'upcoming' || r.status === 'live' ? ([['Arrive by', formatTime(r.arriveBy)]] as [string, string][]) : []),
+    ['Leave by', `${formatTime(r.end + IDLE_GRACE_MS)}, then ${formatEuro(IDLE_CENTS_PER_MIN)}/min (max ${formatEuro(OVERSTAY_CAP_CENTS)})`],
+    ...(r.status === 'walkup' ? [] : ([['Fee', `${formatEuro(r.feeCents)} · ${r.demand.toLowerCase()} demand${r.creditUsedCents ? ` · ${formatEuro(r.creditUsedCents)} credit used` : ''}`]] as [string, string][])),
+    ...(r.cancelNowCents !== null
+      ? ([['Cancelling now', r.cancelNowCents === 0 ? 'free' : `costs ${formatEuro(r.cancelNowCents)} (${cancelPercent(r, now)}%)`]] as [string, string][])
+      : []),
+    ...(r.bookedVia ? ([['Booked via', r.bookedVia]] as [string, string][]) : []),
+  ];
+  return (
+    <section className="rounded-2xl bg-surface p-6 ring-1 ring-line">
+      <dl className="grid gap-x-6 gap-y-3 sm:grid-cols-2">
+        {rows.map(([k, v]) => (
+          <div key={k}>
+            <dt className="font-mono text-xs font-medium uppercase tracking-[0.1em] text-muted">{k}</dt>
+            <dd className="mt-0.5 font-semibold">{v}</dd>
+          </div>
+        ))}
+      </dl>
+    </section>
+  );
+}
+
+function Plate({ r, onDark }: { r: ReservationView; onDark?: boolean }) {
+  if (!r.vehicleLabel && !r.plateHint && !r.extraPlateHint) return null;
+  return (
+    <div className={`mt-6 flex flex-wrap items-center gap-3 pt-5 ${onDark ? 'border-t border-white/14' : 'border-t border-line'}`}>
+      <CarFront aria-hidden className={`size-5 ${onDark ? 'text-on-brand-muted' : 'text-muted'}`} />
+      {r.vehicleLabel && <span className="font-semibold">{r.vehicleLabel}</span>}
+      {r.plateHint && <PlateBadge plate={r.plateHint} size="sm" />}
+      {r.extraPlateHint && (
+        <span className={`flex items-center gap-2 text-sm ${onDark ? 'text-on-brand-muted' : 'text-muted'}`}>
+          and today <PlateBadge plate={r.extraPlateHint} size="sm" />
+        </span>
+      )}
+    </div>
+  );
+}
+
+function Upcoming({ r, now }: { r: ReservationView; now: number }) {
+  const left = r.start - now;
+  return (
+    <section className="rounded-3xl bg-surface p-6 ring-1 ring-line sm:p-8">
+      <span className={`${chipClass} bg-brand-tint text-brand-strong`}>Booked</span>
+      <p className="mt-4 font-mono text-sm uppercase tracking-[0.08em] text-muted">Starts {day(r.start, now).toLowerCase() === 'today' ? 'today' : day(r.start, now)} at</p>
+      <p className="mt-1 font-display text-8xl leading-[0.85]">{formatTime(r.start)}</p>
+      <p className="mt-3 text-lg text-muted">
+        In {duration(left)}. It goes live 30 minutes before the start, and the guard holds the bay until {formatTime(r.arriveBy)}.
+      </p>
+      <Plate r={r} />
+      <div className="mt-6 border-t border-line pt-5">
+        <CancelSchedule steps={r.cancelSchedule} noShowCents={r.feeCents} now={now} />
+      </div>
+    </section>
+  );
+}
+
+function Live({ r, now, busy, onCheckIn }: { r: ReservationView; now: number; busy: string | null; onCheckIn: () => void }) {
+  const before = now < r.start;
   return (
     <>
       {r.carAtBay && (
@@ -242,245 +361,154 @@ function Reserved({
           The camera saw a car but couldn’t read its plate. If that’s you, tap “I’m at the bay”.
         </Banner>
       )}
-
       <section className="rounded-3xl bg-brand-deep p-6 text-on-brand sm:p-8">
         <span className={`${chipClass} bg-signal text-ink`}>
           <span className="size-2 rounded-full bg-ink" /> Held for you
         </span>
-        <p className="mt-4 font-display text-8xl leading-[0.85] text-signal sm:text-9xl">{formatCountdown(r.expiresAt - now)}</p>
-        <p className="mt-3 font-mono text-sm uppercase tracking-[0.08em] text-on-brand-muted">
-          left to arrive · <span className="font-semibold text-on-brand">arrive by {formatTime(r.expiresAt)}</span>
-          {r.extendedAt ? ' · extended' : ''}
+        <p className="mt-4 font-mono text-sm uppercase tracking-[0.08em] text-on-brand-muted">{before ? `Starts at ${formatTime(r.start)}, in` : `Arrive by ${formatTime(r.arriveBy)}`}</p>
+        <p className="mt-1 font-display text-8xl leading-[0.85] text-signal sm:text-9xl">{formatCountdown((before ? r.start : r.arriveBy) - now)}</p>
+        <p className="mt-3 text-sm text-on-brand-muted">
+          {before ? 'The guard keeps the bay free for you.' : 'left to arrive.'} When you drive in, the camera reads your plate and lowers the guard.
         </p>
-        <div className="mt-6 flex flex-wrap items-center gap-3 border-t border-white/14 pt-5">
-          <CarFront className="size-5 text-on-brand-muted" />
-          <span className="font-semibold">{r.vehicleLabel}</span>
-          {r.plateHint && <PlateBadge plate={r.plateHint} size="sm" />}
-          {r.extraPlateHint && (
-            <span className="flex items-center gap-2 text-sm text-on-brand-muted">
-              and today <PlateBadge plate={r.extraPlateHint} size="sm" />
-            </span>
-          )}
-        </div>
-        <p className="mt-3 text-sm text-on-brand-muted">The guard is up. When you drive in, the camera reads your plate and lowers it.</p>
+        <Plate r={r} onDark />
       </section>
-      <section className="rounded-2xl bg-surface p-6 ring-1 ring-line">
-        <SessionFacts r={r} now={now} cancelling />
-      </section>
-
-      <div className="grid gap-3 sm:grid-cols-2">
-        <a href={directionsUrl(state.bay)} target="_blank" rel="noopener" className={buttonClass('primary', 'lg', 'sm:col-span-2')}>
-          <Navigation className="size-5" /> Navigate by car
-        </a>
-        {/* the fallback check-in only opens once the bay's hardware has seen a car (server-checked too) */}
-        {r.carAtBay ? (
-          <Button variant="secondary" size="lg" loading={busy === 'checkin'} onClick={onCheckIn}>
-            <MapPin className="size-5" /> I’m at the bay
-          </Button>
-        ) : (
-          <p className="self-center px-2 text-sm text-muted">Plate not read? Once the camera has seen your car, you can check in here.</p>
-        )}
-        <Button variant="secondary" size="lg" loading={busy === 'extend'} disabled={!!r.extendedAt} onClick={() => onStep('extend', 'extend')}>
-          <Timer className="size-5" /> {r.extendedAt ? `Extended by ${EXTENSION_MIN} min` : `+${EXTENSION_MIN} min · ${formatEuro(PRICES.extension)}`}
+      {/* the fallback check-in only opens once the bay has seen a car (server-checked too) */}
+      {r.carAtBay ? (
+        <Button size="lg" loading={busy === 'checkin'} onClick={onCheckIn}>
+          <MapPin aria-hidden className="size-5" /> I’m at the bay
         </Button>
-        <Button variant="secondary" size="lg" onClick={() => onDialog('other-car')}>
-          <CarFront className="size-5" /> Different car today
-        </Button>
-        <Button variant="ghost" size="lg" onClick={() => onDialog('cancel')}>
-          <X className="size-5" /> Cancel booking
-        </Button>
-      </div>
-      <NotifyMe />
+      ) : (
+        <p className="px-1 text-sm text-muted">Plate not read? Once the camera has seen your car, you can check in here.</p>
+      )}
     </>
   );
 }
 
-function Blocked({ r, state, busy, onCancel }: { r: ReservationView; state: AppState; busy: string | null; onCancel: () => void }) {
-  const [choice, setChoice] = useState<null | 'wait' | 'other'>(null);
-  const [nearby, setNearby] = useState<(Charger & { distance: number })[] | null>(null);
-  const paused = r.expiresAt - (r.blockedSince ?? r.expiresAt);
-
-  async function findOther() {
-    setChoice('other');
-    const { lat, lng } = state.bay;
-    const found = await api<{ chargers: Charger[] }>('GET', `/api/chargers?sw_lat=${lat - 0.02}&sw_lng=${lng - 0.03}&ne_lat=${lat + 0.02}&ne_lng=${lng + 0.03}`).catch(
-      () => ({ chargers: [] }),
-    );
-    setNearby(
-      found.chargers
-        .filter((c) => !c.fault)
-        .map((c) => ({ ...c, distance: distanceM(state.bay, c) }))
-        .filter((c) => c.distance > 15)
-        .sort((a, b) => a.distance - b.distance)
-        .slice(0, 4),
-    );
-  }
-
+function Blocked({
+  r,
+  from,
+  busy,
+  onCancel,
+  onBookInstead,
+}: {
+  r: ReservationView;
+  from: Bay | null;
+  busy: string | null;
+  onCancel: () => void;
+  onBookInstead: (b: Bay) => void;
+}) {
   return (
     <>
       <section className="rounded-3xl bg-warn-tint p-6 text-ink sm:p-8">
-        <TriangleAlert className="size-8 text-warn" />
-        <h2 className="mt-3 font-display text-4xl leading-[0.95] tracking-[0.012em]">Another car is in your bay</h2>
+        <TriangleAlert aria-hidden className="size-8 text-warn" strokeWidth={1.5} />
+        <h2 className="mt-3 font-display text-4xl leading-[0.95] tracking-[0.012em]">Your bay is occupied</h2>
         <p className="mt-2 text-lg">
-          Your hold is paused with <span className="font-mono font-semibold">{formatCountdown(paused)}</span> left, so you lose no time.
-          We’ve alerted the operator.
+          Another car is in the bay. Your arrival deadline waits for as long as it’s there{r.real ? ', and we’ve alerted the operator' : ''}.
         </p>
-        <p className="mt-1 text-muted">Since {formatTime(r.blockedSince ?? 0)}. If you cancel now, it’s free.</p>
+        <p className="mt-1 text-muted">Since {formatTime(r.blockedSince ?? 0)}. Cancelling now is free.</p>
+        {r.creditGrantedCents > 0 && (
+          <p className="mt-4 rounded-2xl bg-surface px-4 py-3 font-semibold">{formatEuro(r.creditGrantedCents)} credit is on your account for the trouble. It’s used on your next booking.</p>
+        )}
       </section>
 
-      {choice !== 'other' && (
-        <div className="grid gap-3 sm:grid-cols-2">
-          <Button variant={choice === 'wait' ? 'secondary' : 'primary'} size="lg" onClick={() => setChoice('wait')}>
-            <Clock className="size-5" /> Keep waiting
-          </Button>
-          <Button variant="secondary" size="lg" onClick={findOther}>
-            <Navigation className="size-5" /> Find another charger
+      <section className="rounded-2xl bg-surface p-6 ring-1 ring-line">
+        <h3 className="font-display text-2xl leading-none tracking-[0.012em]">Free chargers nearby</h3>
+        <div className="mt-3">
+          <AlternativeList bays={r.reroute?.alternatives ?? []} from={from} onBook={onBookInstead} />
+        </div>
+        <div className="mt-4 border-t border-line pt-4">
+          <Button variant="danger" loading={busy === 'cancel'} onClick={onCancel}>
+            Cancel for free
           </Button>
         </div>
-      )}
-      {choice === 'wait' && (
-        <p className="text-muted">We’ll keep the bay for you. The timer starts again the moment the other car leaves.</p>
-      )}
-
-      {choice === 'other' && (
-        <section className="rounded-2xl bg-surface p-6 ring-1 ring-line">
-          <h3 className="font-display text-2xl leading-none tracking-[0.012em]">Nearest public chargers</h3>
-          <p className="text-sm text-muted">Not reservable: first come, first served.</p>
-          {nearby === null ? (
-            <div className="mt-4 h-40 animate-pulse rounded-2xl bg-sunken" />
-          ) : nearby.length ? (
-            <ul className="mt-3 divide-y divide-line">
-              {nearby.map((c) => (
-                <li key={c.id} className="flex items-center gap-3 py-3">
-                  <span className="min-w-0 flex-1">
-                    <span className="block truncate font-medium">{c.name}</span>
-                    <span className="font-mono text-[0.8125rem] text-muted">
-                      {Math.max(0, ...c.points.map((p) => p.power))} kW · {formatDistance(c.distance)}
-                    </span>
-                  </span>
-                  <a href={directionsUrl(c)} target="_blank" rel="noopener" className={buttonClass('secondary', 'sm')}>
-                    <Navigation className="size-4" /> Go
-                  </a>
-                </li>
-              ))}
-            </ul>
-          ) : (
-            <p className="mt-3 text-muted">No other chargers found nearby.</p>
-          )}
-          <div className="mt-4 flex flex-wrap gap-3 border-t border-line pt-4">
-            <Button variant="danger" loading={busy === 'cancel'} onClick={onCancel}>
-              Cancel for free
-            </Button>
-            <Button variant="ghost" onClick={() => setChoice('wait')}>
-              Keep waiting instead
-            </Button>
-          </div>
-        </section>
-      )}
+      </section>
     </>
   );
 }
 
 const CHECK_IN = {
-  exact: 'The camera recognised your plate.',
+  camera: 'The camera recognised your plate.',
   fuzzy: 'The camera recognised your plate, even though it misread a character.',
   fallback: 'You checked in at the bay yourself.',
+  walkup: 'You unlocked the bay at the charger.',
 };
 
-function Arrived({ r, state, now, busy, onCharge }: { r: ReservationView; state: AppState; now: number; busy: string | null; onCharge: () => void }) {
-  const how = r.checkInMethod === 'fallback' ? CHECK_IN.fallback : r.matchedBy === 'fuzzy' ? CHECK_IN.fuzzy : CHECK_IN.exact;
+function Arrived({ r, busy, onCharge }: { r: ReservationView; busy: string | null; onCharge: () => void }) {
+  const how = r.checkInMethod === 'fallback' ? CHECK_IN.fallback : r.checkInMethod === 'walkup' ? CHECK_IN.walkup : r.matchedBy === 'fuzzy' ? CHECK_IN.fuzzy : CHECK_IN.camera;
   return (
     <>
-      <SessionReminder r={r} bayName={state.bay.name} />
       <section className="rounded-3xl bg-brand-deep p-6 text-on-brand sm:p-8">
-        <CircleCheck className="size-9 text-mint" strokeWidth={1.5} />
+        <CircleCheck aria-hidden className="size-9 text-mint" strokeWidth={1.5} />
         <h2 className="mt-3 font-display text-4xl leading-[0.9] tracking-[0.012em]">You’re checked in</h2>
-        <p className="mt-2 text-lg text-on-brand">
-          {how} The guard is down: park and plug in.
-        </p>
+        <p className="mt-2 text-lg">{how} The guard is down: park and plug in.</p>
         {r.arrivedAt && <p className="mt-2 font-mono text-sm uppercase tracking-[0.08em] text-on-brand-muted">Arrived at {formatTime(r.arrivedAt)}</p>}
       </section>
-      <section className="rounded-2xl bg-surface p-6 ring-1 ring-line">
-        <SessionFacts r={r} now={now} />
-      </section>
       <Button size="lg" loading={busy === 'charge'} onClick={onCharge}>
-        <PlugZap className="size-5" /> Start charging
+        <PlugZap aria-hidden className="size-5" /> Start charging
       </Button>
-      <p className="text-sm text-muted">Prototype: the charger isn’t connected yet, so starting is a tap here.</p>
-      <NotifyMe />
     </>
   );
 }
 
-function Charging({ r, state, now, busy, onFinish }: { r: ReservationView; state: AppState; now: number; busy: string | null; onFinish: () => void }) {
+// Charging, or a walk-up session: both end at r.end, then 5 free minutes, then the idle fee
+function Session({ r, now, busy, onFinish }: { r: ReservationView; now: number; busy: string | null; onFinish: () => void }) {
   const left = r.end - now;
+  const walkup = r.status === 'walkup';
   return (
     <>
-      <SessionReminder r={r} bayName={state.bay.name} />
       <section className="rounded-3xl bg-brand-deep p-6 text-on-brand sm:p-8">
         <span className={`${chipClass} bg-signal text-ink`}>
-          <PlugZap className="size-4" /> Charging
+          <PlugZap aria-hidden className="size-4" /> {walkup ? 'Walk-up' : 'Charging'}
         </span>
-        <p className="mt-4 font-display text-8xl leading-[0.85] text-signal sm:text-9xl">{elapsed(now - (r.chargingAt ?? now))}</p>
-        <p className="mt-3 text-lg text-on-brand-muted">
-          since {formatTime(r.chargingAt ?? 0)} ·{' '}
-          {left > 0 ? (
-            `session ends at ${formatTime(r.end)}, in ${formatLength(Math.ceil(left / MIN))}`
-          ) : (
-            // warn orange is too dark to read on ink, so the ended state is bold paper
-            <span className="font-semibold text-on-brand">your session has ended</span>
-          )}
-          . When you drive off, the camera ends it.
+        <p className="mt-4 font-mono text-sm uppercase tracking-[0.08em] text-on-brand-muted">
+          {left > 0 ? `${walkup ? 'Free until' : 'Until'} ${formatTime(r.end)}, left` : 'Slot over'}
         </p>
-      </section>
-      <section className="rounded-2xl bg-surface p-6 ring-1 ring-line">
-        <SessionFacts r={r} now={now} />
+        <p className="mt-1 font-display text-8xl leading-[0.85] text-signal sm:text-9xl">{left > 0 ? formatCountdown(left) : elapsed(now - r.end)}</p>
+        <p className="mt-3 text-on-brand-muted">
+          {left > 0
+            ? walkup
+              ? `The next booking starts after ${formatTime(r.end)}, so the bay is yours until then.`
+              : `Charging since ${formatTime(r.chargingAt ?? r.start)}. When you drive off, the camera ends the session.`
+            : now < r.end + IDLE_GRACE_MS
+              ? `Your ${IDLE_GRACE_MS / MIN} free minutes to leave run until ${formatTime(r.end + IDLE_GRACE_MS)}.`
+              : `The idle fee is running: ${formatEuro(IDLE_CENTS_PER_MIN)} a minute, up to ${formatEuro(OVERSTAY_CAP_CENTS)}.`}
+        </p>
       </section>
       <Button size="lg" loading={busy === 'finish'} onClick={onFinish}>
         Finish and leave
       </Button>
-      <NotifyMe />
     </>
   );
 }
 
 function doneText(r: ReservationView) {
-  const total = r.totalCents ?? 0;
-  if (r.status === 'completed') {
-    const over = r.charges?.find((c) => c.kind === 'overstay');
+  const over = r.charges.find((c) => c.kind === 'overstay');
+  if (r.status === 'completed')
     return {
       title: 'Session complete',
-      text: over ? `Thanks for charging. You stayed past the grace, so idle time was added: ${formatEuro(over.cents)}.` : 'Thanks for charging. The bay is free for the next driver.',
+      text: over ? `Thanks for charging. You stayed past the free minutes, so idle time was added: ${formatEuro(over.cents)}.` : 'Thanks for charging. The bay is free for the next driver.',
     };
-  }
-  if (r.status === 'cancelled') {
+  if (r.status === 'cancelled')
     return {
       title: 'Booking cancelled',
-      text: total ? `The guard is down and the bay is free again. Cancelling cost ${formatEuro(total)}; the rest was returned.` : 'The guard is down and the bay is free again. Nothing was charged.',
+      text: r.totalCents ? `The bay is free again. Cancelling cost ${formatEuro(r.totalCents)}; the rest was returned.` : 'The bay is free again. Nothing was charged.',
     };
-  }
-  const by = `You didn’t arrive by ${formatTime(r.expiresAt)}, so the bay went to the next driver.`;
-  return {
-    title: 'You didn’t arrive in time',
-    text: r.prepaid ? `${by} The ${formatEuro(total)} you prepaid is kept.` : `${by} You pay ${formatEuro(total)}; the rest of the fee was returned.`,
-  };
+  return { title: 'You didn’t arrive in time', text: `You didn’t arrive by ${formatTime(r.arriveBy)}, so the bay went to the next driver. The ${formatEuro(r.feeCents)} fee is kept.` };
 }
 
 function Done({ r }: { r: ReservationView }) {
   const d = doneText(r);
   const rows = [
-    ['Reserved', formatTime(r.createdAt ?? 0)],
+    ['Booked', formatTime(r.createdAt)],
     r.arrivedAt && ['Checked in', formatTime(r.arrivedAt)],
     r.chargingAt && r.endedAt && ['Charged for', duration(r.endedAt - r.chargingAt)],
-    r.blockedMs ? ['Bay blocked for', duration(r.blockedMs)] : null,
   ].filter(Boolean) as [string, string][];
-
   return (
     <>
       <section className="rounded-2xl bg-surface p-6 ring-1 ring-line sm:p-8">
         <h2 className="font-display text-4xl leading-[0.9] tracking-[0.012em]">{d.title}</h2>
         <p className="mt-2 text-lg text-muted">{d.text}</p>
-        <dl className="mt-6 grid grid-cols-2 gap-x-6 gap-y-3 border-t border-line pt-5 sm:grid-cols-4">
+        <dl className="mt-6 grid grid-cols-2 gap-x-6 gap-y-3 border-t border-line pt-5 sm:grid-cols-3">
           {rows.map(([k, v]) => (
             <div key={k}>
               <dt className="font-mono text-xs font-medium uppercase tracking-[0.1em] text-muted">{k}</dt>
@@ -491,7 +519,7 @@ function Done({ r }: { r: ReservationView }) {
       </section>
       <section className="rounded-2xl bg-surface p-6 ring-1 ring-line sm:p-8">
         <h3 className="mb-4 font-display text-2xl leading-none tracking-[0.012em]">Receipt</h3>
-        <Receipt charges={r.charges ?? []} totalCents={r.totalCents ?? 0} />
+        <Receipt charges={r.charges} totalCents={r.totalCents} />
       </section>
       <div className="flex flex-wrap gap-3">
         <Link href="/explore" className={buttonClass('primary', 'lg')}>
@@ -505,16 +533,14 @@ function Done({ r }: { r: ReservationView }) {
   );
 }
 
-function CancelDialog({ open, r, now, busy, onClose, onConfirm }: { open: boolean; r: ReservationView; now: number; busy: boolean; onClose: () => void; onConfirm: () => void }) {
-  const fee = r.blockedSince ? 0 : cancellationFee(r.feeCents ?? 0, { bookedAt: r.createdAt ?? 0, start: r.start ?? 0, cancelledAt: now });
+function CancelDialog({ open, r, busy, onClose, onConfirm }: { open: boolean; r: ReservationView; busy: boolean; onClose: () => void; onConfirm: () => void }) {
+  const fee = r.cancelNowCents ?? 0;
   return (
     <Dialog open={open} onClose={onClose} title="Cancel this booking?">
-      <p className="text-lg">
-        {fee === 0
-          ? 'Cancelling now is free: you get everything back.'
-          : `Cancelling now costs ${formatEuro(fee)}. The rest of the ${formatEuro(r.totalCents ?? 0)} you paid comes back.`}
+      <p aria-live="polite" className="text-lg">
+        {fee === 0 ? 'Cancelling now is free: you get everything back.' : `Cancelling now costs ${formatEuro(fee)}. The rest of what you paid comes back.`}
       </p>
-      <p className="mt-2 text-muted">That’s always less than not turning up. The guard comes down and the bay is free for other drivers.</p>
+      <p className="mt-2 text-muted">That’s always less than not turning up. The bay is free for other drivers straight away.</p>
       <div className="mt-6 flex flex-wrap gap-3">
         <Button variant="danger" size="lg" loading={busy} onClick={onConfirm}>
           Cancel booking
@@ -527,39 +553,67 @@ function CancelDialog({ open, r, now, busy, onClose, onConfirm }: { open: boolea
   );
 }
 
-function OtherCarDialog({ open, busy, onClose, onSubmit }: { open: boolean; busy: boolean; onClose: () => void; onSubmit: (plate: string) => void }) {
+// Another registered car, or a one-off plate for today (erased when the booking ends)
+function OtherCarDialog({ open, busy, onClose, onSubmit }: { open: boolean; busy: boolean; onClose: () => void; onSubmit: (body: { vehicleId: string } | { plate: string; consent: true }) => void }) {
+  const [cars, setCars] = useState<Vehicle[]>([]);
   const [plate, setPlate] = useState('');
   const [consent, setConsent] = useState(false);
+  useEffect(() => {
+    if (open) api<Vehicle[]>('GET', '/api/vehicles').then(setCars, () => {});
+  }, [open]);
   return (
     <Dialog open={open} onClose={onClose} title="Driving a different car?">
-      <form
-        className="grid gap-5"
-        onSubmit={(e: FormEvent) => {
-          e.preventDefault();
-          onSubmit(plate);
-        }}
-      >
-        <p className="text-muted">Add today’s plate and the camera lets that car in too. It’s forgotten when the booking ends.</p>
-        <Field label="Today’s license plate">
-          <input
-            value={plate}
-            onChange={(e) => setPlate(e.target.value.toUpperCase())}
-            required
-            maxLength={14}
-            autoComplete="off"
-            autoCapitalize="characters"
-            placeholder="B XY 123"
-            className={`${inputClass} font-mono text-lg font-semibold uppercase tracking-[0.06em]`}
-          />
-        </Field>
-        <label className="flex cursor-pointer gap-3 rounded-2xl bg-sunken p-4">
-          <input type="checkbox" checked={consent} onChange={(e) => setConsent(e.target.checked)} className="mt-0.5 size-5 shrink-0 accent-brand" />
-          <span>Use this plate to check me in for this booking only.</span>
-        </label>
-        <Button type="submit" size="lg" loading={busy} disabled={!plate.trim() || !consent}>
-          Add plate
-        </Button>
-      </form>
+      <div className="grid gap-5">
+        {cars.length > 1 && (
+          <div>
+            <p className="font-semibold">One of your cars</p>
+            <ul className="mt-2 grid gap-2">
+              {cars.map((c) => (
+                <li key={c.id}>
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => onSubmit({ vehicleId: c.id })}
+                    className="flex min-h-11 w-full items-center gap-4 rounded-2xl p-3 text-left ring-1 ring-line-strong hover:bg-brand-tint"
+                  >
+                    <PlateBadge plate={c.display} size="sm" />
+                    <span className="font-medium">{c.label}</span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+        <form
+          className="grid gap-5"
+          onSubmit={(e: FormEvent) => {
+            e.preventDefault();
+            onSubmit({ plate, consent: true });
+          }}
+        >
+          <p className="text-muted">Or add today’s plate, and the camera lets that car in too. It’s forgotten when the booking ends.</p>
+          <Field label="Today’s licence plate">
+            <input
+              value={plate}
+              onChange={(e) => setPlate(e.target.value.toUpperCase())}
+              required
+              maxLength={14}
+              autoComplete="off"
+              autoCapitalize="characters"
+              spellCheck={false}
+              placeholder="B XY 123"
+              className={`${inputClass} font-mono text-lg font-semibold uppercase tracking-[0.06em]`}
+            />
+          </Field>
+          <label className="flex min-h-11 cursor-pointer gap-3 rounded-2xl bg-sunken p-4">
+            <input type="checkbox" checked={consent} onChange={(e) => setConsent(e.target.checked)} className="mt-0.5 size-5 shrink-0 accent-brand" />
+            <span>Use this plate to check me in for this booking only.</span>
+          </label>
+          <Button type="submit" size="lg" loading={busy} disabled={!plate.trim() || !consent}>
+            Add plate
+          </Button>
+        </form>
+      </div>
     </Dialog>
   );
 }

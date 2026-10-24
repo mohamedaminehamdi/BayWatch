@@ -8,5 +8,5 @@ export const POST = () =>
   handle(async () => {
     const userId = await requireUser();
     if (process.env.VOICE_DEMO !== '1') fail(503, 'Voice booking is switched off');
-    return signVoiceToken(userId, process.env.VAPI_BEARER_SECRET, Date.now()) ?? fail(503, 'Voice booking is not configured');
+    return signVoiceToken(userId, process.env.VOICE_SESSION_SECRET, Date.now()) ?? fail(503, 'Voice booking is not configured');
   });

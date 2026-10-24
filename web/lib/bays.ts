@@ -12,6 +12,7 @@ export type BayInfo = Pick<Bay, 'id' | 'name' | 'lat' | 'lng' | 'address' | 'net
 };
 
 export const DEFAULT_BAYS = 'bw-1:lock-0002,bw-2:lock-0003,bw-3:';
+const RETIRED: string[] = []; // see RETIRED_LOCKS in ecurious.ts: the server's team list decides
 const SPACING_M = 6; // until the venue's real coordinates are known
 
 // ECURIOUS_BAYS="bw-1:lock-0002,bw-2:lock-0003,bw-3:" (an empty lock = no hardware yet). One position for all
@@ -23,11 +24,14 @@ export function baywatchBays(env: Record<string, string | undefined> = process.e
   const lngPerBay = SPACING_M / (111_320 * Math.cos((lat * Math.PI) / 180));
   const entries = (env.ECURIOUS_BAYS ?? DEFAULT_BAYS).split(',').map((e) => e.trim()).filter(Boolean);
   return entries.flatMap((entry, i) => {
-    const [id, lock = ''] = entry.split(':').map((s) => s.trim());
-    if (!/^bw-\d{1,3}$/.test(id) || (lock && !/^lock-\d{4}$/.test(lock))) {
+    const [id, given = ''] = entry.split(':').map((s) => s.trim());
+    if (!/^bw-\d{1,3}$/.test(id)) {
       console.warn(`ECURIOUS_BAYS: skipped "${entry}". Use bw-N:lock-NNNN, or bw-N: for a bay without hardware.`);
       return [];
     }
+    // an invalid or retired lock id leaves the bay simulated; locks the team doesn't have are dropped at start-up
+    const lock = /^lock-\d{4}$/.test(given) && !RETIRED.includes(given) ? given : '';
+    if (given && !lock) console.warn(`ECURIOUS_BAYS: ${id} runs without hardware: "${given}" isn't a lock we can use`);
     const bay: BayInfo = {
       id,
       name: `Baywatch Bay ${id.slice(3)}`,
