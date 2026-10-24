@@ -1,30 +1,30 @@
 # Limitations and scaling
 
-_Last updated: 2026-10-24. This is challenge deliverable 5._
+_Last updated: 2026-10-24, booking v2. This is challenge deliverable 5._
 
 ## Limitations today
 
 | Area | Limitation | Upgrade path |
 |---|---|---|
-| **Hardware** | The real client ([ecurious.ts](../web/lib/ecurious.ts)) is verified read-only: the bay list, bay details, the latest plate and the event stream. **Pending: the supervised phase-2 test** of everything that moves the arm, the camera's plate list and auto-lift. Until then the app runs the mock. | Run [phase 2](hardware-integration.md#phase-2-the-live-test-at-the-bay) with an operator, a spotter and a test car, then set `ECURIOUS_LIVE=1`. |
-| **Camera plate list** | `ECURIOUS_WHITELIST` is off, because German plates may not be stored (unverified). Our own matching lowers the arm instead, a little later than the camera would. | Phase 2, step 3 decides. |
-| **Hardware events** | The stream has no replay, so events missed while disconnected are gone. Only `connected` and `lock:heartbeat` have been seen live. The other event names come from the vendor dashboard's code. | `status()` re-reads over REST every 5 s. Phase 2 confirms the names. |
-| **One bay** | One reservation at a time, for one configured bay (`BAY_*` env). | Key the engine by bay id: `location_id` / `evse_uid`, as OCPI already models it. |
-| **State** | In memory and single process. A restart loses bookings, alerts and the waitlist. History is capped at 300. | A database such as Postgres (reservations, outcomes kept 90 days, alerts), and a job queue for timers and reminders. |
+| **Hardware** | Two real locks (`lock-0002`, `lock-0003`) drive `bw-1` and `bw-2`. `bw-3` has no lock yet, and the GoingElectric bays have a simulated guard. The physical LED has no API, so the app shows a virtual one. | More locks via `ECURIOUS_BAYS`. Each adapter call already takes a `lockId`. |
+| **Hardware events** | The stream has no replay, so events missed while disconnected are gone. | `status()` re-reads over REST every 5 s per lock. |
+| **State** | Every schedule, booking and alert is in memory, in one process. A restart loses bookings (cars and credits survive, in Clerk). | A database for bookings and outcomes, and a job queue for the 5 s tick and the reminders. |
 | **Hosting** | Needs one long-running `next start`. Serverless hosting would split the state. | Possible once state is in a database. |
-| **Booking model** | "Reserve now" only, so the cheaper cancellation tiers are unreachable. | Advance booking: a slot schedule with overlap checks, pre-start reminders, and a decision on device lock timing ([reservation-model.md](reservation-model.md#advance-booking-of-a-fixed-slot-planned)). |
-| **Payments** | Mock ("demo payment"). | A payment provider, billing reservation fees with the next charging session to avoid per-payment card fees. |
-| **Demand pricing** | No real occupancy data, so normal demand unless the demo control sets it. | Occupancy from the site's own session history and the charger's status (OCPP). |
-| **Fallback check-in** | It needs the camera to have seen the car (an unreadable read), with location as an extra check. The presence sensor isn't wired yet, so a car the camera misses entirely can't use the fallback. | Wire the presence sensor. A code on the device display or a QR sticker would be stronger still. |
-| **Free cancellations** | Chained free 2-minute cancellations (book, cancel, book again) can keep the bay held, by a partner or a driver. | **Planned, not built:** a cap on free cancellations per partner and per driver, per hour. |
-| **Reminders** | In-app banner plus a browser notification, and only while the page is open. | Push notifications in the native app. |
-| **Flutter** | Chrome only, and it can't reserve (no Clerk yet). | Clerk's Flutter SDK (beta) with Bearer tokens, then iOS and Android builds. |
-| **Accounts** | A temporary Clerk app (accountless dev keys). | Claim it (`npx clerk auth login`), then a production instance. |
-| **Email alerts** | Resend's sandbox delivers only to the account's own address. | Verify a sending domain. |
-| **Operators** | One email allowlist, no tenancy. | Clerk Organizations: one org per CPO, with roles and per-site access. |
-| **Partner API** | Built, for one bay.<br>• Tokens are issued by hand.<br>• No `CommandResult` callbacks (SSRF).<br>• Partner links and rate-limit windows are in memory.<br>• A checked-in partner booking only ends when the camera sees the car leave. | • The OCPI Versions/Credentials handshake.<br>• Callbacks only to hosts registered there.<br>• A database for links.<br>• The rate limit at the API gateway.<br>• The charger's transaction-end event (OCPP) to close sessions. |
-| **Data protection** | Cars are stored in Clerk, a US processor. | A data processing agreement and standard contractual clauses, or EU-hosted storage for plates. |
-| **Search** | Place search on submit only (Nominatim policy). | A geocoding provider that allows autocomplete. |
+| **Payments** | Stripe test mode (holds and capture) is built and passed a live test, but **isn't wired into booking v2**. The demo payment is used, and the keys are paused for the demo. | Wire the hold into v2 bookings and the capture into the end of a session ([payments.md](payments.md)). |
+| **Demand pricing** | By time of day and configured holidays, not by real occupancy | Occupancy from each site's own history and the chargers' status (OCPP) |
+| **Simulated guards** | Every GoingElectric charger is bookable, but nothing physically holds those bays. The UI says "Demo: simulated guard". | A guard device per bay, or a CPO integration that reserves the connector (OCPP `ReserveNow`) |
+| **Fallback check-in and walk-up** | They need hardware evidence on a real lock, plus the 150 m geofence (spoofable on its own). The placeholder coordinates are in Berlin. | Set `BAY_LAT`/`BAY_LNG` to the venue. A code on the device display, or a QR sticker. |
+| **Reminders** | An in-app banner plus a browser notification, only while the app is open | Web Push through a service worker, or the native app |
+| **Free cancellations** | The 3-upcoming limit caps hoarding, but chained free 2-minute cancellations can still keep a bay held | A cap on free cancellations per driver and per partner, per hour |
+| **Credits** | Who funds the €5 blocked-bay credit (operator or platform) is undecided | Settle it in the CPO contract |
+| **Voice** | Demo payment only (`VOICE_DEMO=1`). Phone calls book for one demo account. | Real payment, and a caller lookup for phone calls |
+| **Flutter** | A port of the web screens, so a web change needs the same change in Dart. Google sign-in is only in the Next.js web app (email + password or a code works). No push notifications or deep links yet. Native builds not yet run. | Build on Android and iOS; Clerk OAuth with a deep-link redirect; push via FCM/APNs; share copy and rule numbers from one source |
+| **Accounts** | A temporary Clerk app (accountless dev keys) | Claim it (`npx clerk auth login`), then a production instance |
+| **Email alerts** | Resend's sandbox delivers only to the account's own address | Verify a sending domain |
+| **Operators** | One email allowlist, no tenancy | Clerk Organizations: one org per CPO |
+| **Partner API** | Tokens issued by hand, no callbacks (SSRF), and links and rate limits in memory | The OCPI Credentials handshake, callbacks to registered hosts, and a database |
+| **Data protection** | Cars and credits are stored in Clerk, a US processor | A data processing agreement and standard contractual clauses, or EU-hosted storage |
+| **Process** | Several tools and sessions share one working tree | One owner per file, and explicit paths when committing ([what-did-not-work](what-did-not-work.md)) |
 
 ## Scaling to other apps, operators and locations
 
@@ -39,7 +39,7 @@ _Last updated: 2026-10-24. This is challenge deliverable 5._
 - **Other locations and hardware:**
   - The hardware sits behind a 3-function adapter, and the real CC5S client fills those same functions. So another vendor's barrier, a parking lock, or an OCPP charger's own `ReserveNow` can plug in the same way.
   - Plate events reach the engine as a generic `plateEvent(plate, direction)`: from the Ecurious stream through the bridge, or from any camera through the webhook.
-  - Our team already has three camera bays. Keying the engine by bay id would let one server run all three.
+  - The engine already keys every schedule by bay id, and the adapter takes a `lockId`. More Baywatch bays are one `ECURIOUS_BAYS` entry each.
 - **Roaming (pitch-only):**
   - GIREVE speaks OCPI. Our two commands already follow its Commands module. Add Versions, Credentials, Locations, Tariffs and CDRs, and a hub can expose Ecurious bays to every connected app, without separate integrations.
   - Hubject speaks its own OICP. Its remote reservation start and stop calls map onto the same two operations.
@@ -56,7 +56,7 @@ _Last updated: 2026-10-24. This is challenge deliverable 5._
 - **How plate events reach us:** a live Server-Sent Events stream at `/api/v1/events`, with `lock:`-prefixed event names. Plate reads come as `lock:photo_captured`, and the car sensor as `lock:car_presence`.
 
 **Still open:**
-- Which of the three bays is physically ours at the venue, and its coordinates. We need them for `ECURIOUS_LOCK_ID`, `BAY_LAT` / `BAY_LNG` and the 150 m check-in radius.
+- The venue's coordinates, for `BAY_LAT` / `BAY_LNG` and the 150 m check-in and walk-up radius.
 - The hardware questions in [hardware-integration.md](hardware-integration.md#open-questions-for-the-ecurious-mentors):
   - the auto-lift timeout;
   - whether German plates work on the camera's list;

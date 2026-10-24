@@ -1,18 +1,17 @@
-# Ecurious Reserve
+# Baywatch
 
-**Your charging spot, kept free.** A charging app for public EV charging that reserves a bay with Ecurious hardware and checks you in by license plate when you arrive. Built for the Ecurious challenge at the Watt the Hack hackathon.
+**Your charging spot, kept free.** Book any public charger for a time slot. On Baywatch bays, an Ecurious lock holds the bay, and its camera lets your car in by its license plate. Built for the Ecurious challenge at the Watt the Hack hackathon.
 
 **Status (2026-10-24):**
 - **Built:**
-  - the driver app (landing → sign-in → find → reserve → arrive → charge → receipt), with the full fee rules;
-  - the operator dashboard, with a hardware panel;
-  - the partner API for other charging apps;
-  - the real hardware client for the Ecurious bay (REST calls plus live events), verified read-only.
+  - **Booking v2:** every GoingElectric charger is bookable on a 15-minute grid, up to 60 days ahead.
+  - **Three Baywatch bays:** `bw-1` → `lock-0002` and `bw-2` → `lock-0003` are real Ecurious locks, and `bw-3` has no hardware yet. The dev server runs with live hardware.
+  - **Booking rules:** class and demand pricing (€5 for a standard reservation, cap €10), a 100% no-show fee, cancellation tiers, overstay after 5 free minutes, blocked-bay re-routing with a €5 credit, and walk-up unlock.
+  - The operator dashboard, the partner API (OCPI-style), and voice booking (Vapi).
+  - **The Flutter app** ([mobile/](mobile/)): every web screen ported to Flutter, on the same API and Clerk accounts. Tested in Chrome; Android and iOS are configured but not yet built ([mobile/README.md](mobile/README.md)).
+- **Not wired yet:** Stripe card payments are built and tested (test mode), but booking v2 uses the demo payment for now ([payments.md](docs/payments.md)).
 
-  The full cycle runs end to end on the built-in **mock**. On the real bay, it waits for the supervised test that moves the arm ([phase 2](docs/hardware-integration.md#phase-2-the-live-test-at-the-bay)).
-- **Look:** the UI uses the Ecurious brand from ecurious.com ([web/DESIGN.md](web/DESIGN.md)).
-
-**Code:** the private GitHub repo [BayWatch](https://github.com/mohamedaminehamdi/BayWatch).
+**Code:** the private GitHub repo [BayWatch](https://github.com/mohamedaminehamdi/BayWatch). Working branch: `feat/booking-v2-voice-pricing`.
 
 ## The challenge in short
 
@@ -25,8 +24,8 @@ Full brief: [CHALLENGE.md](CHALLENGE.md).
 
 | Deliverable | Where |
 |---|---|
-| 1. App prototype showing GoingElectric charge points | [web/](web/): Explore map and list with live GoingElectric data |
-| 2. Full reservation cycle on the hardware | Runs end to end on the mock ([data flows §1](docs/data-flows.md#1-reserve--arrive--charge--release)). The real client is built and verified read-only. The run on the bay is the supervised [phase-2 test](docs/hardware-integration.md#phase-2-the-live-test-at-the-bay). |
+| 1. App prototype showing GoingElectric charge points | [web/](web/): Explore map and list with live GoingElectric data, every charger bookable |
+| 2. Full reservation cycle on the hardware | `bw-1` and `bw-2` drive the real Ecurious locks: [data flows §1](docs/data-flows.md#1-book--arrive--charge--leave-a-bay-with-a-real-lock) and [hardware-integration.md](docs/hardware-integration.md) |
 | 3. Documentation: architecture, API calls, data flows, decisions, tools, what didn't work | [docs/](#docs) |
 | 4. Answers to at least two mission areas | Six areas: [docs/mission-areas.md](docs/mission-areas.md) |
 | 5. Limitations and scaling | [docs/limitations-and-scaling.md](docs/limitations-and-scaling.md) |
@@ -34,88 +33,96 @@ Full brief: [CHALLENGE.md](CHALLENGE.md).
 ## User flows
 
 **Driver** (web app, installable as a PWA):
-1. Land on the home page, then sign up or sign in with Google or email (Clerk).
+1. Land on the home page. Sign up or sign in with Google or email (Clerk). The first reservation is free.
 2. Add your car: plate, nickname, and consent to plate recognition.
-3. **Explore:** real GoingElectric chargers on a map and a list, with search, "Locate me", "Fast ≥ 50 kW" and "Reservable only". Only the Ecurious bay is reservable; others show details and Navigate.
-4. **Reserve:** pick your car and how long you'll charge: 30 min to 2 h on a fast bay, 1 to 4 h on a slow one, 1 h by default. See the price (by charger type and demand, never above €4) and the rules in plain words. Accept them, then confirm the demo payment.
-5. **Booking:**
-   - a live countdown to arrive, and Navigate;
-   - "+5 min" when running late;
-   - "I'm at the bay", once the camera has seen your car but couldn't read its plate;
-   - "Different car today";
-   - reminders 1 h and 15 min before your session ends.
-   If another car is in your bay, your hold pauses and the nearest free chargers appear.
-6. The camera reads your plate (misreads tolerated), the guard lowers, and you charge. Finish, or drive out, to get a receipt. Your history is under **Bookings**.
+3. **Explore:** the three Baywatch bays (big violet dots) and every GoingElectric charger, with search, "Locate me" and a fast filter. A virtual LED shows whether a bay can be unlocked right now.
+4. **Book now:** pick a start on the 15-minute grid (today or up to 60 days ahead) and a length up to the bay's class maximum (slow 4 h, fast 2 h, ultra 1 h). See the price (€5 for a standard fast reservation, more at busy hours, never above €10), the credit used, and the cancellation schedule. Accept the fees and pay (demo payment). At most 3 upcoming bookings.
+5. **Your booking:**
+   - reminders the day before, 30 min before (the booking goes live) and 5 min before;
+   - Navigate, and arrive within 15 min of the start.
+   - On a Baywatch bay, the arm rises 10 min before the start, and the camera lowers it for your plate (misreads tolerated). "I'm at the bay" works when the camera saw your car but couldn't read the plate.
+6. **Blocked bay:** if another car is in your bay, you're re-routed to the nearest free bays ("Book instead"), you get a **€5 credit**, and you can cancel for free.
+7. **Charge, then leave:** 5 free minutes after your slot, then €0.30/min. You get a receipt, and your history is under Bookings.
+8. **Walk-up:** at a free bay, "Unlock now" lets you in at once, free, until the next booking. On a real lock, the camera must read one of your own plates.
+9. **Voice:** tap the mic and say "Book bay 1 now for an hour". The assistant reads the quote back and books when you say yes ([voice-booking.md](docs/voice-booking.md)).
 
 **Operator** (email listed in `OPERATOR_EMAILS`):
-1. **Operator** tab: live bay status, and **blocked-bay alerts** with the plate. Alerts also arrive by email, without the plate. Use "Bay is clear" to resolve one.
-2. 7-day KPIs: reservations, completion and no-show rates, time to arrive, blocked minutes, camera vs fallback check-ins, and revenue share. Plus a chart and the event log.
-3. **Hardware panel:**
-   - the guard (up, down or unknown) and, live, the bay's health;
-   - a warning if the camera would lower the arm for any car, or if the arm is up without a booking;
-   - "Lower the arm" for recovery.
+- **Per real bay:** status, blocked-bay alerts (with email), and the hardware panel (guard, sensor, health, "Lower the arm").
+- **7-day KPIs:** including credits issued, walk-ups, and the overstay split.
 
-**Partner app:** reserve for your driver by plate through OCPI-style `RESERVE_NOW`, then poll the status. The bay camera checks that car in like any other. Or link to the public bay page `/bay/{id}`. See [API](#api).
+**Partner app:** reserve a bay by id through OCPI-style `RESERVE_NOW`, with an optional `ecurious_start` and `ecurious_blocks` ([api.md](docs/api.md)).
 
 ## API
 
-- Every route, with its auth, request, response and errors: [docs/api-calls.md](docs/api-calls.md).
-- Other charging apps use the partner API: the guide is [docs/api.md](docs/api.md), and the OpenAPI 3.1 spec is served at [`/openapi.json`](web/public/openapi.json).
+- Every route: [docs/api-calls.md](docs/api-calls.md).
+- Other charging apps: the partner guide [docs/api.md](docs/api.md), and the OpenAPI 3.1 spec served at [`/openapi.json`](web/public/openapi.json).
 
-| Partner endpoint (`Authorization: Token`) | What it does |
+| Main endpoints | What they do |
 |---|---|
-| `POST /ocpi/2.2.1/commands/RESERVE_NOW` | Reserve the bay for your driver, by plate, at the price your driver accepted |
-| `POST /ocpi/2.2.1/commands/CANCEL_RESERVATION` | Cancel one of your reservations before the driver arrives |
-| `GET /api/partner/v1/reservations/{reservation_id}` | Poll its status, arrival deadline and fees. We don't send callbacks. |
+| `GET /api/bays`, `GET /api/bays/{id}/availability`, `GET /api/bays/{id}/quote` | Map bays, a day's 15-min blocks, a price |
+| `POST /api/reservations`, `POST /api/reservations/{id}/{cancel, checkin, charge, finish}` | Book and manage a booking |
+| `POST /api/bays/{id}/unlock` | Walk-up |
+| `POST /ocpi/2.2.1/commands/RESERVE_NOW`, `CANCEL_RESERVATION`, `GET /api/partner/v1/reservations/{id}` | Partner apps (`Authorization: Token`) |
 
 ## Quickstart
 
-You need Node.js 20.9 or later, and npm. Flutter is optional.
+You need Node.js 20.9 or later, and npm.
 
 ```bash
 cd web
 npm install
-cp .env.example .env    # fill in the keys below
+cp .env.example .env      # fill in the keys below
 npx -y clerk@latest init  # only if web/.env.local has no Clerk keys yet: creates a temporary, claimable app
-npm run dev             # http://localhost:3000
-npm test                # booking rules, reservation engine, plates, operator stats, alert email, partner API
+npm run dev               # http://localhost:3000
+npm test                  # booking rules and schedule, hardware client, partner API, payments, voice, …
 ```
 
 | Variable (`web/.env`) | Needed for | Notes |
 |---|---|---|
-| `GE_API_KEY` | Charge points on the map | [Request a key](https://www.goingelectric.de/stromtankstellen/api/new/) (needs a GoingElectric account) |
-| `BAY_ID` | Partner API and bay page | The bay's OCPI `location_id` (default `ECU-TEST-1`). Its public page is `/bay/<BAY_ID>`. |
-| `BAY_NAME`, `BAY_ADDRESS`, `BAY_LAT`, `BAY_LNG`, `BAY_POWER_KW` | The Ecurious bay | The coordinates are a Berlin placeholder: set the venue's, so "I'm at the bay" works (150 m) |
-| `BAY_TYPE` | Price and slot limits | `fast` or `slow`. By default from power (≥ 50 kW is fast) |
-| `HOLD_MINUTES` | Demos | Overrides the 15-min arrival grace, for example `1` to show a no-show. Fractions are allowed (`0.5` = 30 s). |
-| `SIMULATOR` | The demo panel | `1` shows the "Demo" button (fake camera events, site demand, "Simulate a week"). **Never with `ECURIOUS_LIVE=1`:** a faked plate would move the real arm, so the server refuses to start with both. |
-| `WEBHOOK_SECRET` | Real camera events | Required by `POST /api/plate-events`. If it's unset, all events are rejected. |
+| `GE_API_KEY` | Chargers on the map | [Request a key](https://www.goingelectric.de/stromtankstellen/api/new/) (needs an account) |
+| `ECURIOUS_BAYS` | The Baywatch bays | `bw-1:lock-0002,bw-2:lock-0003,bw-3:`. Locks the team doesn't have are dropped at start-up, and `lock-0001` is never called. |
+| `BAY_ADDRESS`, `BAY_LAT`, `BAY_LNG`, `BAY_POWER_KW` | Where the Baywatch bays are, and their power | Placeholder Berlin coordinates: set the venue's (the 150 m check-in and walk-up radius) |
+| `HOLIDAYS` | Demand pricing | Dates priced as busy (`YYYY-MM-DD,…`) |
+| `ECURIOUS_API_KEY`, `ECURIOUS_LIVE` | Real locks | Both are needed: `ECURIOUS_LIVE=1` makes bookings on `bw-1` and `bw-2` move the real arms. `ECURIOUS_MOCK=1` is the kill switch. |
+| `ECURIOUS_WHITELIST`, `ECURIOUS_LOCK_ID`, `ECURIOUS_VACANT_MS` | Real locks | The camera whitelist is **on** by default (`0` turns it off). `ECURIOUS_LOCK_ID` is the CLI's lock (no fallback). The "car left" debounce defaults to 10 000 ms. |
+| `SIMULATOR` | The demo panel | `1` = fake plates, a car in a simulated bay, site demand, "Simulate a week". Allowed with live hardware: demo events are refused (403) on bays with a real lock. |
+| `WEBHOOK_SECRET` | Other camera sources | Required by `POST /api/plate-events`. Empty = all rejected. |
 | `OPERATOR_EMAILS` | Operator dashboard and alert emails | Comma-separated sign-in emails |
-| `RESEND_API_KEY`, `ALERT_FROM` | Alert emails | Optional. Without a domain, Resend delivers only to its own account's address. |
-| `ECURIOUS_API_KEY` | Real hardware | The team's Ecurious server key. **On its own it doesn't go live:** that also needs `ECURIOUS_LIVE=1`. |
-| `ECURIOUS_LIVE`, `ECURIOUS_MOCK` | Real hardware | `ECURIOUS_LIVE=1` moves the real arm. `ECURIOUS_MOCK=1` forces the mock, as the kill switch. The default is the mock. |
-| `ECURIOUS_LOCK_ID`, `ECURIOUS_WHITELIST`, `ECURIOUS_VACANT_MS` | Real hardware | Set the bay (`lock-0001` to `lock-0003`: match the serial on the device). Put the booked plate on the camera's list (off until phase 2). Set the "car left" debounce (10 000 ms). See [hardware-integration.md](docs/hardware-integration.md#configuration). |
-| `OCPI_PARTNER_TOKENS` | Partner API | `name:token,…` with lowercase names and tokens of 32+ characters (`openssl rand -hex 32`). Empty = the partner API is closed. |
-| Clerk keys | Sign-in | Written to `web/.env.local` by `clerk init`. Claim the app with `npx clerk auth login`. Google sign-in is enabled. |
+| `RESEND_API_KEY`, `ALERT_FROM` | Alert emails | Optional |
+| `OCPI_PARTNER_TOKENS` | Partner API | `name:token,…` (lowercase names, 32+ characters). Empty = closed. |
+| `STRIPE_SECRET_KEY`, `NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY` | Card payments (test mode) | Not wired into booking v2 yet. Paused for the demo, so the demo payment is used ([payments.md](docs/payments.md)). |
+| `VOICE_DEMO`, `VAPI_BEARER_SECRET`, `VOICE_SESSION_SECRET`, `VOICE_DEMO_USER_ID` | Voice booking | `VOICE_DEMO=1` switches it on (demo payment). The bearer secret authenticates Vapi's webhook, and the session secret signs the mic's tokens. |
+| `NEXT_PUBLIC_VAPI_PUBLIC_KEY`, `NEXT_PUBLIC_VAPI_ASSISTANT_ID` | The in-app mic | The mic shows only when both are set |
+| Clerk keys | Sign-in | Written to `web/.env.local` by `clerk init`. Claim the app with `npx clerk auth login`. |
 
-**Mobile (legacy):** `cd mobile && flutter run -d chrome --dart-define=API_URL=http://localhost:3000`. It shows the map and bay status, and can't reserve until it gets Clerk sign-in.
+**The Flutter app** needs the web app running (it serves the API and the app's config):
+
+```bash
+cd mobile
+flutter pub get
+flutter run -d chrome   # phones: add --dart-define=API_URL=http://<your computer's LAN address>:3000
+```
 
 ## Docs
 
 | Doc | What's in it | Last updated |
 |---|---|---|
 | [architecture.md](docs/architecture.md) | Components, module map, state, security | 2026-10-24 |
-| [api-calls.md](docs/api-calls.md) | Every route (auth, request, response, errors) and every external call | 2026-10-24 |
-| [api.md](docs/api.md) | Integration guide for other charging apps (OCPI-style), by the interop agent | 2026-10-24 |
-| [hardware-integration.md](docs/hardware-integration.md) | The Ecurious bay hardware: the API, live events, how the app maps onto it, safety, and the phase-2 test plan (hardware agent) | 2026-10-24 |
-| [data-flows.md](docs/data-flows.md) | Sequence diagrams for every flow, plus where personal data goes and when it's erased | 2026-10-24 |
-| [decisions.md](docs/decisions.md) | Design decisions (D1–D38) | 2026-10-24 |
+| [api-calls.md](docs/api-calls.md) | Every route and every external call | 2026-10-24 |
+| [api.md](docs/api.md) | Integration guide for other charging apps (OCPI-style) | 2026-10-24 |
+| [data-flows.md](docs/data-flows.md) | The v2 cycle with real hardware, blocked bays, walk-up, voice, fees, personal data | 2026-10-24 |
+| [reservation-model.md](docs/reservation-model.md) | Booking v2 rules and prices, with 18 sources | 2026-10-24 |
+| [hardware-integration.md](docs/hardware-integration.md) | The Ecurious locks: API, events, safety, test plan | 2026-10-24 |
+| [payments.md](docs/payments.md) | Stripe test mode: holds and capture | 2026-10-24 |
+| [voice-booking.md](docs/voice-booking.md) | Voice booking with Vapi | 2026-10-24 |
+| [unit-economics.md](docs/unit-economics.md) | Revenue split and hardware payback | 2026-10-24 |
+| [decisions.md](docs/decisions.md) | Design decisions | 2026-10-24 |
 | [tools.md](docs/tools.md) | Frameworks, services, test tooling, AI usage | 2026-10-24 |
-| [what-did-not-work.md](docs/what-did-not-work.md) | An honest log of what failed and what we did | 2026-10-24 |
-| [mission-areas.md](docs/mission-areas.md) | Our answers to six mission areas, with the business model | 2026-10-24 |
-| [reservation-model.md](docs/reservation-model.md) | Reservation and pricing rules with 18 sources (pricing agent) | 2026-10-24 |
-| [limitations-and-scaling.md](docs/limitations-and-scaling.md) | Limitations, scaling, open items for the Ecurious mentors | 2026-10-24 |
-| [web/PRODUCT.md](web/PRODUCT.md), [web/DESIGN.md](web/DESIGN.md) | Product brief, and the Ecurious brand system (applied) | 2026-10-24 |
+| [what-did-not-work.md](docs/what-did-not-work.md) | What failed and what we did | 2026-10-24 |
+| [mission-areas.md](docs/mission-areas.md) | Our answers to six mission areas | 2026-10-24 |
+| [limitations-and-scaling.md](docs/limitations-and-scaling.md) | Limitations, scaling, open items | 2026-10-24 |
+| [web/PRODUCT.md](web/PRODUCT.md), [web/DESIGN.md](web/DESIGN.md) | Product brief, and the brand system | 2026-10-24 |
+| [mobile/README.md](mobile/README.md) | The Flutter app: screen map to the web, running it, sign-in, platforms | 2026-10-24 |
 
 ## Glossary
 
@@ -123,9 +130,9 @@ npm test                # booking rules, reservation engine, plates, operator st
 |---|---|
 | **CPO** | Charge Point Operator: runs the chargers and pays for Bay Guard alerts |
 | **eMSP** | e-Mobility Service Provider: the app or card a driver uses. A partner for our API. |
-| **OCPI** | Open Charge Point Interface: the roaming protocol between CPOs and eMSPs. Its Commands module has `RESERVE_NOW` / `CANCEL_RESERVATION`. |
+| **OCPI** | Open Charge Point Interface: the roaming protocol. Its Commands module has `RESERVE_NOW` / `CANCEL_RESERVATION`. |
 | **OCPP** | Open Charge Point Protocol: charger ↔ backend, with `ReserveNow` / `CancelReservation` |
 | **LPR** | License plate recognition: the bay camera |
-| **Bay Guard** | Our CPO plan: blocked-bay alerts, KPIs and the dashboard, at €19 per bay per month |
+| **Walk-up** | Unlocking a free bay on the spot, without a booking |
 
-Fair play: we only use the provided hardware and server access, respect GoingElectric's terms (server-side key, modest request rate, attribution), and treat plates as personal data ([data-flows.md](docs/data-flows.md#personal-data)).
+Fair play: we only use the provided hardware and server access (`lock-0001` is no longer the team's and is never called), respect GoingElectric's terms, and treat plates as personal data ([data-flows.md](docs/data-flows.md#personal-data)).

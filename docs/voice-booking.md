@@ -2,19 +2,22 @@
 
 A driver says "Hey Siri, call Baywatch", or taps the mic in the app. Then they say where, when and for how long. The assistant checks the slot, reads back the exact booking and fee, and books only after the driver says yes. The booking shows up in the app under **Bookings**.
 
-Scope: booking only, for any signed-in driver, with their first registered car. Payment is simulated, so all of it runs only with `VOICE_DEMO=1`. Cancelling, route planning, real charges and moving the arm by voice are out of scope.
+Scope: booking only, for any signed-in driver, with their first registered car, on the Baywatch bays. Payment is simulated, so all of it runs only with `VOICE_DEMO=1`. Cancelling, route planning and real charges are out of scope.
+
+Bookings go through the booking engine (`reserve()` in [web/lib/booking.ts](../web/lib/booking.ts), with the demo payment), exactly like a booking made in the app. A booking for **now** on a bay with a real lock raises its arm, as any booking does. The team accepted this.
 
 Code:
 
 - [web/lib/voice.ts](../web/lib/voice.ts): the logic, with tests in `voice.test.ts`.
 - [web/app/api/voice/vapi/route.ts](../web/app/api/voice/vapi/route.ts): the webhook that Vapi calls.
 - [web/app/api/voice/session/route.ts](../web/app/api/voice/session/route.ts): mints the session token for the app's mic.
+- [web/components/voice/mic-button.tsx](../web/components/voice/mic-button.tsx): the mic in the app header. It fetches the token and starts the Vapi call with it.
 
 ## Who a call books for
 
 1. **The app's mic.** Before the call starts, the signed-in app calls `POST /api/voice/session` (Clerk session).
    - It gets back `{ token, expiresAt }`: an HMAC-SHA256 token naming the driver, valid for 15 minutes.
-   - The token's key is derived from `VAPI_BEARER_SECRET` with the label `voice-session`.
+   - The token's key is derived from `VOICE_SESSION_SECRET`, which stays on our server. It's deliberately not `VAPI_BEARER_SECRET`: Vapi and the teammate who configures it hold that one, and they must not be able to mint tokens for other drivers.
    - The app starts the call with `vapi.start(assistantId, { metadata: { voiceToken: token } })`.
    - The token reaches the webhook as `message.call.assistantOverrides.metadata.voiceToken`. Vapi never puts `metadata` into the prompt, so the model can't see or change it. `variableValues`, by contrast, are filled into prompts.
    - The webhook checks the token in constant time on every tool call and books for that driver.
@@ -43,7 +46,7 @@ Tool arguments and the caller's number never decide the account. Quotes are boun
 | Night | A start between 00:00 and 06:59 is asked about once per call ("03:00 at night, not 15:00?"). If the assistant sends the same time again, it's accepted. |
 | Duration | Rounded up to whole quarter hours, up to the bay's maximum (2 h on fast bays). The read-back says when it rounded up. |
 | Quotes | A quote books nothing and is valid for 5 minutes. It's bound to the call and the account. |
-| Confirm | Checks the quote again: the call, the account, the expiry, whether the slot is still free and whether the price has changed. A repeated or parallel confirm returns the same booking. |
+| Confirm | Checks the quote again: the call, the account, the expiry, whether the slot is still free and whether the price has changed. A repeated or parallel confirm returns the same booking. If the engine refuses with a 409, voice quotes again. If the slot is still free at a new price, it answers `expired` with the new `priceCents`. Otherwise it answers `unavailable` with alternatives. |
 
 ## Tools for the Vapi assistant
 
@@ -150,16 +153,18 @@ The other answers:
 }
 ```
 
-- `confirm_reservation` can also return `{ "status": "expired", "message" }` (the quote is more than 5 minutes old, or the price has moved), `unavailable` (with alternatives), or `{ "status": "error", "message" }`.
+- `confirm_reservation` can also return `{ "status": "expired", "message" }` when the quote is more than 5 minutes old, or `{ "status": "expired", "priceCents", "message" }` when the price has moved. It can also return `unavailable` (with alternatives), or `{ "status": "error", "message" }`.
 - An `error` is returned for an unknown quote, a quote from another call, or a failed booking.
 
 ## Setup
 
 | Variable | Where | What |
 |---|---|---|
-| `VAPI_BEARER_SECRET` | `web/.env` | A long random token that Vapi's Bearer credential also holds. It also keys the app's session tokens. Without it, every request is rejected and no session can be minted. Share it privately, never in chat or git. |
+| `VAPI_BEARER_SECRET` | `web/.env` | A long random token that Vapi's Bearer credential also holds. Without it, every webhook request is rejected. Share it privately, never in chat or git. |
+| `VOICE_SESSION_SECRET` | `web/.env` | A second long random token that keys the app's voice session tokens. It never leaves our server, so don't give it to Vapi or teammates. Without it, no session can be minted and every app call is refused. |
 | `VOICE_DEMO` | `web/.env` | `1` turns voice booking on, with simulated payment. It's off by default. The booking engine's `'demo'` payment checks the same flag. |
 | `VOICE_DEMO_USER_ID` | `web/.env` | Optional. A Clerk user id (`user_…`) that phone calls book for, since they carry no session token. Without it, phone callers are sent to the app's mic. |
+| `NEXT_PUBLIC_VAPI_PUBLIC_KEY`, `NEXT_PUBLIC_VAPI_ASSISTANT_ID` | `web/.env` | The Vapi public key and the assistant's id, from the Vapi dashboard. The mic button shows only when both are set. The public key is meant for browsers, so it's safe to expose. |
 
 **HTTPS:** the demo runs as a single `next start` on one laptop, so Vapi reaches it through a tunnel:
 
@@ -181,7 +186,8 @@ curl -s -X POST "$URL/api/voice/vapi" -H "authorization: Bearer $VAPI_BEARER_SEC
 
 - **Quotes live in memory, like the engine.** A restart forgets open quotes, and the assistant simply quotes again.
 - **Places are matched by word overlap** with the bays' names and streets. That's fine for three bays, because the read-back names the exact bay. With many bays, a place would need a geocoder.
-- **Status:** the endpoint answers quotes with the v2 rules. Until the v2 booking engine is connected, `confirm_reservation` returns `error`. The mic button isn't built yet.
+- **Tested in code, not in a live call:** `voice.test.ts` runs the whole flow against the real engine (schedule and booking API) with fake hardware, wallets and cars. Over HTTP, unauthenticated requests are rejected. A live call with a signed-in driver needs the env below set on the server.
+- **The mic shows only when configured:** it appears once `NEXT_PUBLIC_VAPI_PUBLIC_KEY` and `NEXT_PUBLIC_VAPI_ASSISTANT_ID` are set. It shows errors, such as "Voice booking is switched off", under the button.
 - **Where the token arrives:** that `metadata` comes back under `message.call.assistantOverrides` is inferred from the API reference, not yet seen in a real call. Check it in Vapi's webhook logs on the first call from the app. The webhook also reads `message.assistant.metadata`.
 - **Token lifetime:** a session token lasts 15 minutes from when it was minted, so a longer call has to be restarted from the app.
 

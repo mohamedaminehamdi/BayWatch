@@ -1,15 +1,15 @@
 # Hardware integration: the Ecurious bay
 
-_Last updated: 2026-10-24. **Verified live (read-only):** the bay list, bay details, the latest plate and the event stream, through our own client. **Still to verify at the bay (phase 2):** every command that moves the arm, the camera's plate list and auto-lift. Until then, the app runs on the mock unless `ECURIOUS_LIVE=1` is set._
+_Last updated: 2026-10-24 (booking v2). **Verified live (read-only):** the lock list, lock details, the latest plate and the event stream, through our own client; the user tested the camera's plate list directly and it works. **Still to verify at the bay (phase 2):** every command that moves the arm, and auto-lift. The app runs on the mock unless `ECURIOUS_LIVE=1` is set._
 
 ## In short
 
-- The bay has a **Chang Cheng CC5S ground lock**: a barrier arm with a car sensor and a plate camera. It sits behind the Ecurious server, which we reach with REST calls and a live event stream (Server-Sent Events). The key goes in an `X-API-Key` header for both, so it never appears in a URL.
-- **Reserve** raises the arm. **Check-in** lowers it with `cancelAutoLift: true`, so it can't rise again under the car, nor after the car has left. **The end of the session** needs no call, because the arm is already down and the bay is open to anyone.
-- **Every bay ships with the camera's plate list set to `["*"]`**, so the camera lowers the arm for _any_ car it reads. That would defeat a hold. A reservation therefore replaces the list. The engine calls `hw.reserve([plate])`, and the adapter sets `[]` by default, or the booked plate with `ECURIOUS_WHITELIST=1`. We never send `wildcard`.
-- **Camera and sensor events** reach the reservation engine through a bridge that `instrumentation.ts` starts once per server:
-  - a plate read becomes `plateEvent(plate, 'in')`;
-  - the car sensor going vacant for 10 s becomes `vacated()`: the car left, and no plate is needed.
+- **Three Baywatch bays, two locks.** Each Baywatch bay is one Chang Cheng CC5S ground lock (a barrier arm with a car sensor and a plate camera) behind the Ecurious server: `bw-1 → lock-0002`, `bw-2 → lock-0003`, and `bw-3` has no lock yet (a simulated guard, "No hardware assigned yet"). `lock-0001` isn't the team's any more and is never called. We reach the server with REST calls and a live event stream (Server-Sent Events); the key goes in an `X-API-Key` header for both, so it never appears in a URL.
+- **The arm is up between sessions** (the bay is guarded). It goes **up** for a booking when the slot is about to start: at booking time for a slot starting within 10 min, otherwise at start − 10 min. A refused raise (a car over the arm, an offline lock) undoes a booking made for "now", with that reason. It goes **down** when the booked car is recognised, or for a walk-up, and **up again** once that session's car has left.
+- **The camera's plate list is on by default.** When the arm goes up for a booking, the booked plate (and a "different car today" plate) goes on the camera's own list, so the camera lowers the arm for that car by itself. If the camera doesn't echo the plate back, the app's own plate match lowers it. The list is emptied at check-in, cancel, no-show and the end of the session. `ECURIOUS_WHITELIST=0` turns it off. We never send `wildcard`.
+- **Camera and sensor events** reach the booking engine (`lib/schedule.ts`) through one bridge per lock that `instrumentation.ts` starts:
+  - every plate read becomes `carSeen(bay, plate)` (walk-up evidence), and `plateEvent(bay, plate)` while a booking is live;
+  - the car sensor going vacant for 10 s becomes `vacated(bay)`: the session ends, and the arm rises again.
 - **The docs and the server disagree.** Event names carry a `lock:` prefix, presence events are called `car_presence`, a third `status` value (`offline`) exists, and the whitelist has two contradictory specs. Details are [below](#what-the-docs-say-and-what-the-server-does).
 
 ## The service
@@ -64,65 +64,71 @@ data: {"type":"lock:heartbeat","lockId":"lock-0002","battery12V":15}
 
 | Topic | Docs | Real |
 |---|---|---|
-| Event names | `status_change`, `vehicle_presence`, `photo_captured`, `alarm` | Prefixed: `lock:heartbeat` (seen). The vendor dashboard listens for `lock:status_change`, **`lock:car_presence`** and `lock:photo_captured`. Plus a `connected` event, and a heartbeat that isn't documented |
-| `status` | `"raised"` or `"lowered"` | Also **`"offline"`**: `lock-0001` was offline from 10:29 (last seen) until at least 10:58, and back to `"raised"` by 11:20. `deviceStatusRaw` keeps the last position (1 raised, 2 lowered) |
+| Event names | `status_change`, `vehicle_presence`, `photo_captured`, `alarm` | Prefixed: `lock:heartbeat` (seen). The vendor dashboard listens for `lock:status_change`, **`lock:car_presence`** and `lock:photo_captured`. Plus a `connected` event, and a heartbeat that isn't documented. **The live server sends `lock:status_changed`** (`status`, `rawStatus`) **and `lock:car_presence_changed`** (`carPresence`, `carPresenceRaw`), seen 24 Oct from 16:00, plus `lock:connected` and `lock:disconnected` when a lock comes and goes (17:14). The parser takes all of them |
+| `status` | `"raised"` or `"lowered"` | Also **`"offline"`**: `lock-0001` was offline from 10:29 (last seen) until at least 10:58, and back to `"raised"` by 11:20. `deviceStatusRaw` keeps the last position (1 raised, 2 lowered). Also **`"moving"`** while the arm travels: `lock-0001` reported it for over 30 s (24 Oct, 17:12–17:13), then `"raised"`, then went offline at 17:14 |
 | Lock fields | 12 fields | Also `deviceStatusRaw`, `carPresenceRaw` (2 = vacant), `whitelist`, and `latestPhoto` on a bay with a read |
 | The list response | `{team, locks}` | `{team, locks, assignedLocks}`, with the same list twice |
 | `plateType` | `"standard"` | `"0"` |
 | `battery3_7V`, `signalStrength4G` | Example values 3.9 and 28 | **0 on every bay**. `battery12V` is 15.0–15.1 V, above a 12 V battery's level, so the units are probably on mains power |
 | `/whitelist`, spec 1 | `{plates: ["MBD14E","B12345"]}` stores both; `{wildcard: true}` means any car; `{plates: []}` disables auto-lowering | The vendor dashboard sends exactly these three bodies |
-| `/whitelist`, spec 2 (same endpoint, documented twice) | "Up to 10 plates"; the request `["吉MBD14E","粤B88888","MBD14E"]` answers "uploaded **2** … rule(s)" and stores only the two plates **with a Chinese province prefix** | Unverified. A German plate might be dropped the same way, so the adapter checks the echo and warns, and `ECURIOUS_WHITELIST` stays off until phase 2 settles it |
+| `/whitelist`, spec 2 (same endpoint, documented twice) | "Up to 10 plates"; the request `["吉MBD14E","粤B88888","MBD14E"]` answers "uploaded **2** … rule(s)" and stores only the two plates **with a Chinese province prefix** | A plate **without** a prefix (`A613EN`) was stored and echoed on `lock-0003` (24 Oct, 17:10), and the camera then lowered the arm by itself, with no command from us, when shown `湘A 613-EN`. The adapter still checks the echo and warns if a plate is missing. The list is on by default (`ECURIOUS_WHITELIST=0` turns it off) |
 | The default list | Not stated | **`["*"]` on all three bays:** any car lowers the arm. The vendor dashboard also shows a missing list as "ANY PLATE" |
 | `cancelAutoLift` | "If true, disables auto-relift timeout", on unlock (and accepted on lock) | The vendor dashboard sends `{cancelAutoLift: true}` on **lock** and `{}` on unlock. The timeout's length and trigger are unverified (phase 2, step 4) |
 | Auth in examples | `?apiKey=` everywhere | The `X-API-Key` header works for REST and for the event stream |
+| The list after a write | Stays as set | **Read back different three times** on `lock-0003` (24 Oct, 17:10–17:16), 15 s to 1.5 min after we set it or after the arm moved. Once it was `["*"]` (any car) again, 34 s after we set the booked plate. The app reads the list back and sends it again, at most every 30 s (`keepList` in `schedule.ts`), so during that gap any car could lower the arm |
 
 ## How the app maps onto the hardware
 
-The engine ([reservation.ts](../web/lib/reservation.ts)) calls `hw.reserve()` and `hw.release()`. The adapter ([ecurious.ts](../web/lib/ecurious.ts)) turns them into the calls below.
+The engine ([schedule.ts](../web/lib/schedule.ts)) calls the adapter ([ecurious.ts](../web/lib/ecurious.ts)) with the lock of the bay, every time: `raise(lockId, plates)`, `lower(lockId)`, `setPlates(lockId, plates)`, `status(lockId)`. A call without a lock reads `ECURIOUS_LOCK_ID` and never guesses, and every call first checks the lock is in the team's list.
 
 | App moment | Hardware calls | Why |
-|---|---|---|
-| **Reserve** (`hw.reserve([plate])`) | A fresh `GET` of the bay → `POST lock {cancelAutoLift: true}` → `POST whitelist {plates: []}` (or `[booked plate]` with `ECURIOUS_WHITELIST=1`) | **The read:** we never raise the arm onto a car (`carPresence` must be `vacant`) or on an `offline` bay. Either refusal rolls the booking back with a 502, `The bay could not be reserved: <reason>`. **The plate list:** this is what makes the hold hold, because `["*"]` lowers the arm for any car. **The flag:** sent as the vendor dashboard does; harmless on a raised arm |
-| **Check-in**: a camera match or the fallback (`hw.release`) | `POST unlock {cancelAutoLift: true}` → `POST whitelist {plates: []}` (skipped if already empty) | In "normal" mode the device raises the arm again after a timeout. That could catch the car while it's still manoeuvring, and after the session it would close a bay the app shows as free. With the flag, the arm stays down until our next `lock` |
+| --- | --- | --- |
+| **The slot starts** (at booking for "now", else start − 10 min): `raise` | A fresh `GET` of the lock → `POST lock {cancelAutoLift: true}` (skipped if it's already up) → `POST whitelist {plates: [booked plate, today's plate]}` | **The read:** we never raise the arm onto a car (`carPresence` must be `vacant`) or on an `offline` lock. For a "now" booking either refusal undoes the booking with its reason; for a later slot a car over the arm marks the booking blocked (the €5 credit, re-routing, the operator alert). **The plate list:** the camera lowers the arm for the booked car by itself; the echoed list says whether it took the plate (`autoUnlock: 'camera'`, else `'app'`) |
+| **Check-in**, camera match | If the camera already lowered the arm (a `status_change` to lowered, or a status read within 3 s): only `POST whitelist {plates: []}`. Otherwise `POST unlock {cancelAutoLift: true}` → `POST whitelist {plates: []}` | No second unlock when the camera let the car in. The flag keeps the arm down under the car |
+| **Check-in**, "I'm at the bay" (the camera saw a car it couldn't read) | `POST unlock {cancelAutoLift: true}` → `POST whitelist {plates: []}` | |
+| **Walk-up** (the camera read the plate of one of the driver's own cars) | `POST unlock` → `POST whitelist {plates: []}` | |
 | **Charging** | none | |
-| **End of the session**: Finish, or the car leaves | none | The arm has been down since check-in and the flag keeps it down, so the bay is open to the public. The camera list is already empty |
-| **Cancel / no-show** (`hw.release`) | Same as check-in | The bay goes back to the public |
+| **End of the session**: the car leaves (sensor vacant 10 s) | `raise`: `POST lock` → the next booking's plates if it's armed, else `POST whitelist {plates: []}` (skipped if already empty) | The bay is guarded again. After "Finish" the arm stays down until the car has gone, so it never rises under it |
+| **Cancel / no-show** of a booking whose arm was up | `POST whitelist {plates: []}` | The plate can't open the bay outside its slot. The arm stays up |
 
 **Why not `keep-state`:**
 - `keep_open` and `keep_closed` are _permanent_ modes. Every change would then need two writes (switch the mode, then move the arm).
 - The current mode can't be read back: `GET` has no field for it.
 - `cancelAutoLift` gives the same "stays where we put it" in one call. `keep normal` remains a manual recovery step, in case the arm ignores commands.
 
-**The camera's own plate list** (`ECURIOUS_WHITELIST=1`):
-- **On:** the booked plate goes on the list at reserve time. The camera then lowers the arm itself the moment that car pulls up: the lowest latency, and it works even if our server lags. The list is cleared at check-in, cancel or no-show.
-- **Off (the default):** our own plate match does it. It tolerates misreads (`samePlate` in [plates.ts](../web/lib/plates.ts)) and lowers the arm through `release()`.
-- **Both modes** replace `["*"]` during a hold.
-- **"Different car today":** that second plate doesn't go on the camera's list. Our own plate match still lets it in, through `release()`.
-- **GDPR:** the plate sits on the vendor's camera only for the length of the booking.
+**The camera's own plate list:**
+- **On (the default):** the booked plate goes on the list when the arm goes up. The camera then lowers the arm itself the moment that car pulls up: the lowest latency, and it works even if our server lags. Our own plate match runs too, without a second unlock. The list is emptied at check-in, cancel, no-show and the end of the session.
+- **The echo decides:** if the camera's answer lacks the plate (the second spec below keeps only Chinese-format plates), the app logs a warning (no plate in it) and its own match lowers the arm, as without the list.
+- **Off (`ECURIOUS_WHITELIST=0`):** the list stays empty, and our own plate match lowers the arm through `unlock`. It tolerates misreads (`samePlate` in [plates.ts](../web/lib/plates.ts)).
+- **Both** replace `["*"]` during a hold, and we only ever send `{plates: [...]}`: never `{wildcard: true}`.
+- **GDPR:** the plate sits on the vendor's camera only from the arm going up until check-in or the end of the booking.
 
 ## Events → the engine
 
-[ecurious-bridge.ts](../web/lib/ecurious-bridge.ts) listens to the stream ([ecurious-events.ts](../web/lib/ecurious-events.ts)) and ignores the other bays' events.
+[ecurious-bridge.ts](../web/lib/ecurious-bridge.ts) listens to the stream ([ecurious-events.ts](../web/lib/ecurious-events.ts)) and runs one bridge per Baywatch bay with a lock; each ignores the other locks' events.
 
 | Event | Action |
-|---|---|
-| A plate read while the bay is **held** (`reserved`), or with a car already on the sensor | `plateEvent(plate, 'in')` at once. The booked car checks in and the engine lowers the arm; another car pauses the hold and alerts the operator |
-| A plate read in an **unbooked** bay, with the sensor vacant | Remembered for 2 min, with no event yet, so a car driving past doesn't mark the bay as taken |
-| Sensor: **vacant → occupied** | `plateEvent(<read in the last 2 min, or '' = unreadable>, 'in')`. With no booking, that marks the bay "a car without a booking". During a hold with no read, the driver is offered the fallback check-in |
-| Sensor: **occupied → vacant**, still vacant after `ECURIOUS_VACANT_MS` (10 s) | `vacated()`: the session completes (with any overstay billed), or a blocker is cleared. It needs no plate, so a session checked in by hand ends too. The wait means a sensor flicker never ends a session |
+| --- | --- |
+| Any plate read | `carSeen(bay, plate)`: the camera saw a car in front of the arm. Kept in memory for 3 min, only so a walk-up can check the plate is one of the driver's own cars |
+| A plate read while a booking is **live**, or with a car already on the sensor | `plateEvent(bay, plate)` at once: the booked car checks in (the arm lowers, or the camera already lowered it) |
+| A plate read in a bay with **nothing booked**, sensor vacant | Remembered for 2 min, with no event yet, so a car driving past doesn't mark the bay as taken |
+| Sensor: **vacant → occupied** | `plateEvent(bay, <read in the last 2 min, or '' = unreadable>)`. During a live booking with no read, the driver is offered "I'm at the bay" |
+| Sensor: **occupied → vacant**, still vacant after `ECURIOUS_VACANT_MS` (10 s) | `vacated(bay)`: the session completes (with any idle fee), a car without a booking is cleared, and the arm rises again. The wait means a sensor flicker never ends a session |
 | Arm moved, heartbeat, alarm | Update the cached status |
+
+The engine also reads each lock's status every 5 s (cached): a vacant sensor clears a stale "car in the bay" (a missed event, a reconnect), and an occupied one with nobody checked in marks the bay taken.
 
 How it runs:
 - **One event at a time.** Events are queued in order, since `plateEvent` waits for the arm. A failing event is logged, and the next one still runs.
-- **One bridge per process.** `startBridge()` stops any earlier bridge before starting, so a dev reload never runs two.
+- **One set of bridges per process.** `startBridge()` stops any earlier one before starting, so a dev reload never runs two. It waits until the team's lock list has been read (and drops any configured lock that isn't in it).
 - **Shared state on `globalThis`.** The engine singleton is already there ([server.ts](../web/lib/server.ts)). The adapter's cache is too, because instrumentation and the route handlers are bundled separately and each get their own copy of the module.
 - **Plates stay in memory, never in a log.** Unknown event names are logged by name only.
 
 ## Status: the `hardware` field
 
-`/api/state` and `/api/operator` call `ecurious.status()` on every poll, and every client polls every 2 s.
+The engine's tick and `/api/state`, `/api/bays` and `/api/operator` call `status(lockId)` for each lock; clients poll every 2 to 3 s.
 
-- **Reads:** at most one hardware read every 5 s, shared by all callers. Once the bay has been read, a stale value is served while it re-reads in the background, so a poll never waits on the hardware. Events keep the value current in between.
+- **Reads:** at most one hardware read per lock every 5 s, shared by all callers. Once the bay has been read, a stale value is served while it re-reads in the background, so a poll never waits on the hardware. Events keep the value current in between.
 - **Failures:** `status()` never throws. If the service is down, it keeps the last value with `stale: true` and `error`, and tries again 5 s after the last attempt ended.
 - **Shape:** the existing `{state, mock}` is kept, and `state` can now also be `'unknown'`. `online` is always present: the mock reports `true`. Live mode adds the following (no plates, ever):
 
@@ -155,25 +161,27 @@ How it runs:
 ## Configuration
 
 | Variable | Default | Meaning |
-|---|---|---|
+| --- | --- | --- |
 | `ECURIOUS_API_KEY` | – | The team key, in `web/.env` |
-| `ECURIOUS_LIVE` | unset | `1` = the real bay. Anything else = the mock |
+| `ECURIOUS_LIVE` | unset | `1` = the real locks. Anything else = the mock |
 | `ECURIOUS_MOCK` | unset | `1` = the mock, even with `ECURIOUS_LIVE=1` |
-| `ECURIOUS_LOCK_ID` | The team's first bay (`lock-0001`) | The bay at the venue. **Set it explicitly:** match the serial printed on the device with `serialHex` |
-| `ECURIOUS_WHITELIST` | unset | `1` = the booked plate goes on the camera's list during the hold |
+| `ECURIOUS_BAYS` | `bw-1:lock-0002,bw-2:lock-0003,bw-3:` | Which lock is behind which Baywatch bay; `bw-N:` = no hardware yet. Checked against the team's list at start-up: an unlisted, invalid or retired lock (`lock-0001`) leaves its bay simulated, with a warning |
+| `ECURIOUS_LOCK_ID` | unset | The lock the CLI and any caller that names no lock use (e.g. `lock-0002`). No fallback: unset means none |
+| `ECURIOUS_WHITELIST` | on | `0` = don't use the camera's plate list; the app's own match lowers the arm |
 | `ECURIOUS_VACANT_MS` | `10000` | How long the car sensor must read vacant before the car counts as gone |
+| `SIMULATOR` | unset | `1` = the demo panel. Its fake plate and occupancy events work for simulated bays (`bw-3`, `ge-*`) and are refused (403) for bays with a real lock |
 
-These are fixed in code, not env: the timeouts (5 s / 8 s), the read backoff (300 ms, 1 s), the status cache (5 s), the command cooldown (30 s), how long a plate read stays fresh (2 min), the stream's reconnect backoff (1 s to 30 s) and its silence limit (60 s).
+These are fixed in code, not env: the timeouts (5 s / 8 s), the read backoff (300 ms, 1 s), the status cache (5 s), the team list cache (5 min), the command cooldown (30 s, per lock), how long a plate read stays fresh (2 min for check-in, 3 min for walk-up), the wait for the camera to lower the arm itself (3 s), the stream's reconnect backoff (1 s to 30 s) and its silence limit (60 s).
 
 ## Files
 
 | File | What |
 |---|---|
-| [lib/ecurious.ts](../web/lib/ecurious.ts) | The adapter: `reserve()`, `release()`, `status()` (keeping the mock's signatures), the REST client, the shared cache, the bay choice |
+| [lib/ecurious.ts](../web/lib/ecurious.ts) | The adapter, one call per lock: `raise()`, `lower()`, `setPlates()`, `status()`, `teamLocks()`; the REST client and the shared cache |
 | [lib/ecurious-events.ts](../web/lib/ecurious-events.ts) | The event stream: parser, event names, reconnect with backoff and a silence watchdog |
-| [lib/ecurious-bridge.ts](../web/lib/ecurious-bridge.ts) | Events → `reservations.plateEvent`. Started once by [instrumentation.ts](../web/instrumentation.ts) (Node.js runtime, live mode only) |
+| [lib/ecurious-bridge.ts](../web/lib/ecurious-bridge.ts) | Events → the engine, one bridge per lock. Started once by [instrumentation.ts](../web/instrumentation.ts) (Node.js runtime, live mode only) |
 | [lib/ecurious-cli.ts](../web/lib/ecurious-cli.ts) | A console for supervised tests: one call per run |
-| `lib/ecurious*.test.ts` | 23 tests: parsing, event mapping, status mapping, caching, errors and safety, with HTTP stubbed (`npm test`) |
+| `lib/ecurious*.test.ts`, `lib/schedule.test.ts` | Parsing, event mapping, status, caching, errors and safety with HTTP stubbed; the engine's hardware call sequence against a mocked lock (`npm test`) |
 
 The secret-protected webhook `POST /api/plate-events` stays as it is, for any other camera source.
 
@@ -238,12 +246,12 @@ export ECURIOUS_LOCK_ID=lock-000N                          # the bay in front of
 ### Step 4: the full cycle in the app (the challenge's prerequisite)
 
 1. **Configure.** In `web/.env`:
-   - set `ECURIOUS_LIVE=1` and `ECURIOUS_LOCK_ID=lock-000N`;
-   - set `ECURIOUS_WHITELIST=1` only if step 3 worked;
+   - set `ECURIOUS_LIVE=1`, `ECURIOUS_BAYS=bw-1:lock-0002,bw-2:lock-0003,bw-3:` and `ECURIOUS_LOCK_ID=lock-0002`;
+   - the camera's plate list is on; set `ECURIOUS_WHITELIST=0` only if step 3 failed;
    - set `BAY_LAT`/`BAY_LNG` to the venue, for the fallback check-in;
-   - leave **`SIMULATOR` unset**.
+   - `SIMULATOR=1` may stay: the demo panel then works for `bw-3` and GoingElectric bays only.
 2. **Clear the dev server.** Make sure no one, and no agent, is running automated UI tests against it. Restart it.
-   - Expect `[ecurious] live events connected, bay lock-000N` in the log.
+   - Expect `[ecurious] live events connected, bays bw-1 (lock-0002), bw-2 (lock-0003)` in the log.
    - On `/operator`, the "mock hardware" label disappears.
 3. **Reserve.** **Spotter:** clear. **Driver:** reserves the bay in the app with the test car.
    - Expect the arm to rise (`status_change` to `raised`) and the app to show "Reserved".

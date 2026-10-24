@@ -22,7 +22,7 @@ Each entry gives the decision, why we made it, and what follows from it.
 ### D4. Flutter in Chrome only
 - **Decision:** the Flutter app runs as Flutter web. The iOS and Android projects are generated but not built.
 - **Why:** Xcode wasn't the active developer tool and there was no Android SDK. The team chose Chrome over installing either.
-- **Consequence:** Flutter lags the web app. It can't reserve since D7 ([limitations](limitations-and-scaling.md)).
+- **Consequence:** Flutter lagged the web app and couldn't reserve after D7. Superseded by D49.
 
 ### D5. Camera events through a fail-closed webhook; the simulator on its own route
 - **Decision:** `POST /api/plate-events` requires `WEBHOOK_SECRET` (constant-time compare) and rejects everything when it's unset. Demo plate events go to `/api/sim/plate-events`, which only exists with `SIMULATOR=1`.
@@ -39,7 +39,7 @@ Each entry gives the decision, why we made it, and what follows from it.
 - **Why:** the team wanted a real login flow (landing → sign in → app). Accountless mode needed no account to start.
 - **Consequence:**
   - The Clerk app is temporary until claimed (`npx clerk auth login`).
-  - Flutter needs Clerk before it can reserve again.
+  - Flutter needed Clerk before it could reserve again (done in D49).
   - Pages are protected per resource (`auth.protect()` in the `(app)` layout, `auth()` in routes), because `createRouteMatcher` is deprecated.
 
 ### D8. Drivers' cars in Clerk private metadata, no database
@@ -256,3 +256,85 @@ Details and sources: [reservation-model.md](reservation-model.md).
 ### D38. End times, not countdowns, in the header pill
 - **Decision:** the header pill shows when the hold ends ("Held until 13:38"). Countdowns elsewhere are labelled as time left, next to the clock time.
 - **Why:** a bare m:ss countdown ("12:30") read like a clock time.
+
+### D39. The product is called Baywatch
+- **Decision:** every user-facing "Ecurious" goes (app name, nav, metadata, manifest, Clerk titles, landing, bay page, emails), and every charger's button reads **"Book now"**.
+- **Why:** the team's own product name. Internals, env vars and the hardware docs keep "Ecurious", the vendor.
+- **Consequence:** this supersedes the "Powered by Ecurious" credit in D15. The paper/ink/lime/violet look stays.
+
+### D40. Booking v2: book any charger ahead, on a grid
+- **Decision:**
+  - Every GoingElectric charger is bookable (`ge-<id>`), with a simulated guard labelled "Demo: simulated guard".
+  - There are three Baywatch bays: `bw-1` → `lock-0002`, `bw-2` → `lock-0003`, and `bw-3` with no lock ("No hardware assigned yet").
+  - Bookings sit on a 15-min grid, with a 10-min gap, up to 60 days ahead, and at most 3 upcoming per driver.
+  - Classes: slow 4 h, fast 2 h, ultra 1 h.
+- **Why:** the team's plan. Reserve-now couldn't serve planned trips, and it made the cheaper cancellation tiers unreachable.
+- **Consequence:** supersedes D23. A new engine ([schedule.ts](../web/lib/schedule.ts)) with a 5 s tick, and shared types in [booking-types.ts](../web/lib/booking-types.ts).
+
+### D41. v2 fees
+- **Decision:**
+  - The fee is €2.50 × class (0.5 / 1 / 1.5) × demand by time and place, capped at €4.
+  - No-show: 100%.
+  - Cancelling: free ≥ 24 h ahead or within 2 min, then 10/50/80%.
+  - Overstay: 5 free min, then €0.30/min, capped at €12, split 50:50.
+  - Six reminders.
+- **Why:** a full no-show fee makes the reliability/prepay rule redundant, and the grid replaces the "+5 min" extension.
+- **Consequence:** supersedes D22. Details are in [reservation-model.md](reservation-model.md). The base and cap changed later, in D48.
+
+### D42. Blocked bay: re-route and credit
+- **Decision:** when a car is in a booked bay from start − 10 min, the driver is re-routed to the nearest free bays, gets a **€5 credit** (once per booking) and a free cancel, and the operator is alerted. New drivers get a **free first reservation**.
+- **Why:** turn a broken promise into the next booking, and give the app a way to bring in new drivers.
+- **Consequence:** a credit wallet in Clerk `privateMetadata`, applied to the next fee automatically.
+
+### D43. Walk-up unlock
+- **Decision:** a free bay with no booking within 30 min + the gap can be unlocked at the bay, for free, until the next booking.
+- **Evidence:** the 150 m geofence, plus, on a real lock, the camera reading **one of the driver's own plates**.
+- **Why:** it uses the gaps between bookings. A security review found that location alone, or any plate, would let anyone open a real arm.
+
+### D44. Live hardware, with the camera whitelist on and a per-bay demo rule
+- **Decision:**
+  - The dev server runs with `ECURIOUS_LIVE=1`.
+  - **The whitelist is on by default:** the booked plate is posted when the arm rises (start − 10 min) and cleared at the end. `wildcard` is never sent.
+  - `ECURIOUS_BAYS` is validated against `GET /locks` at start-up, and `lock-0001` (no longer the team's) is never called.
+  - Demo events are allowed next to live hardware, but refused (403) on bays with a real lock.
+- **Why:** the team asked for real calls. The camera lowering the arm itself is the fastest, server-independent path. The demo still needs simulated bays.
+- **Consequence:** supersedes D33's default-off whitelist and D32's global `SIMULATOR` + `ECURIOUS_LIVE` refusal.
+
+### D45. Payment is decided on the server; Stripe waits
+- **Decision:**
+  - `POST /api/reservations` ignores any `payment` field from the browser. [booking-api.ts](../web/lib/booking-api.ts) decides.
+  - The demo payment is allowed only without Stripe keys, or for voice with `VOICE_DEMO=1`.
+  - Stripe test mode (holds and capture) is built and passed a live test, but isn't wired into v2. Its keys are paused for the demo.
+- **Why:** a security review found that the browser could choose the demo payment. Wiring Stripe into the new engine didn't fit before the demo.
+
+### D46. Voice booking through Vapi
+- **Decision:**
+  - The assistant quotes, reads the quote back, and books only after a yes, using the same engine.
+  - The webhook needs `VAPI_BEARER_SECRET`.
+  - The driver comes from a session token signed with its own `VOICE_SESSION_SECRET`.
+  - The demo payment only, behind `VOICE_DEMO=1`.
+- **Why:** hands-free booking from the car. The secrets are separate, so a leaked webhook secret can't mint driver tokens.
+- **Consequence:** [voice-booking.md](voice-booking.md).
+
+### D47. One working tree, many tools
+- **Decision:** several Claude sessions, Codex and agents work in one tree. The demo fallback server runs from the stable commit `817b029` in its own worktree.
+- **Why:** speed before the demo.
+- **Consequence:** some commits swept up other tools' work ([what-did-not-work](what-did-not-work.md)).
+
+### D48. The standard reservation costs €5, capped at €10
+- **Decision:** on 2026-10-24 the team set the standard (fast) reservation to **€5**, overriding the earlier €4 cap.
+  - Slow is 0.5× (€2.50) and ultra 1.5× (€7.50), with demand tiers on top (fast: quiet €4, busy €7.50, peak €10).
+  - The cap is now **€10**.
+- **Why:** the team's pricing call for the pitch.
+- **Consequence:** supersedes the base and cap in D41. The tables are in [reservation-model.md](reservation-model.md#fees-by-class-and-demand).
+
+### D49. The Flutter app is a native port of the web UI, on the same API and accounts
+- **Decision:** on 2026-10-24 a teammate opened the Flutter app and saw the old single-screen prototype, so `mobile/` was rewritten as a screen-by-screen port of the web app.
+  - Same screens, copy, rules and brand tokens. Each Dart file names the web file it ports ([mobile/README.md](../mobile/README.md)).
+  - Sign-in with the same Clerk accounts. On phones it uses the community Dart SDK `clerk_auth` (pinned `0.0.18-beta`) in native mode. In a browser, Clerk refuses that mode (a request may not carry both `Origin` and `Authorization`), so the web build talks to the official clerk-js through a small bridge (`mobile/web/clerk_bridge.js`). Either way, the app sends Clerk's session JWT as `Authorization: Bearer`, and the server's `auth()` accepts it like the cookie, so no backend change was needed.
+  - `GET /api/config` returns the server's `NEXT_PUBLIC_*` Clerk key and Vapi assistant, so the app always uses the server's Clerk instance and shows the mic exactly when the web does.
+  - The map is `flutter_map` with MapTiler's Positron raster tiles (the teammate's MapTiler key), the closest raster match to the web's OpenFreeMap Positron. The three brand fonts are bundled as static TTFs.
+  - Voice uses the official `vapi` Flutter SDK (web: Vapi's JS SDK; phones: Daily WebRTC, which needs Android 7.0+).
+- **Why:** the team asked for Flutter and a native app, and a WebView shell would block Google sign-in and need extra permission plumbing anyway. A port keeps the app native at the cost of keeping two UIs in step.
+- **Consequence:** supersedes D4. Every web UI change needs the same change in `mobile/`. Google sign-in, push notifications and deep links stay in the Next.js web app for now ([limitations](limitations-and-scaling.md)).
+
