@@ -1,5 +1,7 @@
 # Baywatch
 
+**Project board:** [BayWatch on Notion](https://app.notion.com/p/BayWatch-4032e6d9e3bb8033b730de17ef7f7b33?source=copy_link)
+
 **Your charging spot, kept free.** Book any public charger for a time slot. On Baywatch bays, an Ecurious lock holds the bay, and its camera lets your car in by its license plate. Built for the Ecurious challenge at the Watt the Hack hackathon.
 
 **Status (2026-10-24):**
