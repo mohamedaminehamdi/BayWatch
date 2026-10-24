@@ -14,7 +14,9 @@ import {
   retryAfter,
   runCommand,
 } from './partners.ts';
-import { createReservations } from './reservation.ts';
+import type { BayInfo } from './bays.ts';
+import { bookingFee, demandAt, earliestStart } from './booking-rules.ts';
+import { createSchedule, type Hardware } from './schedule.ts';
 
 const ACME = 'acme-token-0123456789abcdef0123456789';
 const BETA = 'beta-token-0123456789abcdef0123456789';
@@ -31,13 +33,24 @@ async function muted<T>(fn: () => T | Promise<T>): Promise<T> {
   }
 }
 
-// A real reservation lifecycle (fast DC bay) with fake hardware, behind the partner adapter
-function setup() {
+const BW1: BayInfo = { id: 'bw-1', name: 'Baywatch Bay 1', lat: 52.52, lng: 13.405, address: 'Venue', points: [{ type: 'CCS', power: 200, count: 1 }], powerKw: 200, class: 'fast', real: true, guard: 'hardware', lockId: 'lock-0002' };
+
+// The real booking engine (a fast Baywatch bay) with a fake lock, behind the partner adapter
+function setup(raise: Hardware['raise'] = async () => {}) {
   const calls: string[] = [];
-  const hw = { reserve: async () => void calls.push('reserve'), release: async () => void calls.push('release') };
-  const r = createReservations({ hw, bay: { lat: 52.52, lng: 13.405 }, type: 'fast' });
+  const hw: Hardware = {
+    raise: async (lock, plates) => {
+      calls.push(`raise ${lock}`);
+      await raise(lock, plates);
+    },
+    lower: async (lock) => void calls.push(`lower ${lock}`),
+    setPlates: async () => {},
+    status: async () => ({ state: 'blocked', mock: true }),
+  };
+  const r = createSchedule({ bays: [BW1], hw, wallets: { load: async () => ({ creditCents: 0, firstFree: false }), save: async () => {} } });
   const bay = partnerBay(r, new Map());
-  const fee = r.quote(null).cents;
+  const start = earliestStart(Date.now()); // RESERVE_NOW's default: the current block (or the next one)
+  const fee = bookingFee('fast', demandAt(start)).cents;
   const send = async (partner: string, command: string, input: unknown) => {
     const { status, body } = await runCommand(partner, command, async () => input, bay);
     const data = body.data as { result: string; timeout: number; message: { text: string }[]; [k: string]: unknown };
@@ -49,11 +62,10 @@ function setup() {
     token,
     expiry_date: new Date(Date.now() + 15 * MIN).toISOString(),
     reservation_id: 'R-1',
-    location_id: bayId,
-    evse_uid: evseUid,
+    location_id: 'bw-1',
+    evse_uid: 'bw-1-1',
     ecurious_license_plate: 'M-AB 1234',
     ecurious_plate_consent: true,
-    ecurious_session_minutes: 60,
     ecurious_fee_cents: fee,
     ...over,
   });
@@ -61,7 +73,7 @@ function setup() {
     const { status, body } = reservationStatus(partner, id, bay);
     return { status, data: body.data as Record<string, unknown> & { fees: { total_cents: number; lines: unknown[] } } };
   };
-  return { r, calls, fee, token, send, reserveNow, status };
+  return { r, calls, fee, start, token, send, reserveNow, status };
 }
 
 test('partner tokens come from OCPI_PARTNER_TOKENS; bad entries are skipped, and nothing set lets nobody in', async () => {
@@ -106,12 +118,14 @@ test('RESERVE_NOW: every field is checked; malformed is 400, a "no" is REJECTED 
     ['no plate', reserveNow({ ecurious_license_plate: undefined }), 400, /ecurious_license_plate/],
     ['plate too short to read', reserveNow({ ecurious_license_plate: 'M' }), 400, /valid license plate/],
     ['no consent', reserveNow({ ecurious_plate_consent: 'yes' }), 400, /consent/],
-    ['session not whole minutes', reserveNow({ ecurious_session_minutes: 1.5 }), 400, /ecurious_session_minutes/],
-    ['session longer than a fast bay allows', reserveNow({ ecurious_session_minutes: 180 }), 400, /at most 2 h/],
+    ['the v1 length field', reserveNow({ ecurious_session_minutes: 60 }), 400, /replaced by ecurious_blocks/],
+    ['blocks not whole', reserveNow({ ecurious_blocks: 1.5 }), 400, /ecurious_blocks/],
+    ['longer than a fast bay allows', reserveNow({ ecurious_blocks: 9 }), 400, /up to 2 h/],
+    ['a start off the grid', reserveNow({ ecurious_start: earliestStart(Date.now()) + 7 * MIN }), 400, /quarter hour/],
     ['no fee', reserveNow({ ecurious_fee_cents: undefined }), 400, /ecurious_fee_cents/],
     ['response_url too long', reserveNow({ response_url: `https://x.example/${'a'.repeat(300)}` }), 400, /response_url/],
     ['another location', reserveNow({ location_id: 'ECU-ELSEWHERE' }), 200, /Unknown location_id/],
-    ['another EVSE', reserveNow({ evse_uid: `${bayId}-9` }), 200, /Unknown evse_uid/],
+    ['another EVSE', reserveNow({ evse_uid: 'bw-1-9' }), 200, /Unknown evse_uid/],
     ['token not valid', reserveNow({ token: { ...token, valid: false } }), 200, /not valid/],
     ['expiry_date passed', reserveNow({ expiry_date: '2020-01-01T00:00:00Z' }), 200, /already passed/],
     ['price moved since the driver saw it', reserveNow({ ecurious_fee_cents: 1 }), 200, /price is now/],
@@ -176,25 +190,13 @@ test('the bay’s hardware: a refusal is REJECTED with its reason, no answer is 
     delete process.env.ECURIOUS_API_KEY;
   }
 
-  // end to end: the adapter refuses, nothing is booked, and the partner learns why
-  const hw = { reserve: async () => { throw new Error('A car is over the arm, so it was not raised'); }, release: async () => {} };
-  const r = createReservations({ hw, bay: { lat: 52.52, lng: 13.405 }, type: 'fast' });
-  const { token } = setup();
-  const res = await muted(() =>
-    runCommand('acme', 'RESERVE_NOW', async () => ({
-      token,
-      expiry_date: new Date(Date.now() + 15 * MIN).toISOString(),
-      reservation_id: 'R-HW',
-      location_id: bayId,
-      ecurious_license_plate: 'M-AB 1234',
-      ecurious_plate_consent: true,
-      ecurious_session_minutes: 60,
-      ecurious_fee_cents: r.quote(null).cents,
-    }), partnerBay(r, new Map())),
-  );
-  assert.equal(res.status, 200);
-  assert.match((res.body.data as { message: { text: string }[] }).message[0].text, /car is over the arm/);
-  assert.equal(r.state(null).reservation, null);
+  // end to end: the lock refuses, nothing is booked, and the partner learns why
+  const { r, send, reserveNow } = setup(async () => {
+    throw new Error('A car is over the arm, so it was not raised');
+  });
+  const res = await muted(() => send('acme', 'RESERVE_NOW', reserveNow({ reservation_id: 'R-HW' })));
+  assert.deepEqual([res.status, res.data.result, res.text], [200, 'REJECTED', 'The bay could not be reserved: A car is over the arm, so it was not raised']);
+  assert.equal(r.analytics().records.length, 0);
 });
 
 test('rate limit: 60 requests a minute per partner, then Retry-After', () => {
@@ -207,24 +209,28 @@ test('rate limit: 60 requests a minute per partner, then Retry-After', () => {
 });
 
 test('a partner reserves, retries safely, polls and cancels; other partners can neither see nor touch it', async () => {
-  const { r, calls, fee, send, reserveNow, status } = setup();
+  const { r, calls, fee, start, send, reserveNow, status } = setup();
 
   const ok = await send('acme', 'RESERVE_NOW', reserveNow());
   assert.deepEqual([ok.status, ok.code, ok.data.result, ok.data.timeout], [200, 1000, 'ACCEPTED', 0]);
-  assert.equal(ok.data.ecurious_fee_cents, fee);
-  assert.equal(ok.data.ecurious_arrive_by, new Date(r.state(null).reservation!.expiresAt).toISOString());
+  assert.deepEqual([ok.data.ecurious_fee_cents, ok.data.ecurious_start, ok.data.ecurious_end], [fee, start, start + 2 * 60 * MIN], 'the class maximum');
+  assert.equal(ok.data.ecurious_arrive_by, new Date(start + 15 * MIN).toISOString());
+  assert.deepEqual(calls, ['raise lock-0002'], 'a slot starting now raises the arm at once');
 
   const retry = await send('acme', 'RESERVE_NOW', reserveNow());
   assert.equal(retry.data.result, 'ACCEPTED', 'a retry with the same reservation_id is safe');
   assert.match(retry.text, /nothing was changed/);
-  assert.deepEqual(calls, ['reserve'], 'and books nothing twice');
+  assert.deepEqual(calls, ['raise lock-0002'], 'and books nothing twice');
 
   const second = await send('acme', 'RESERVE_NOW', reserveNow({ reservation_id: 'R-2' }));
-  assert.deepEqual([second.status, second.data.result, second.text], [200, 'REJECTED', 'Bay is already reserved']);
+  assert.deepEqual([second.status, second.data.result], [200, 'REJECTED']);
+  assert.match(second.text, /overlaps/);
+  const later = await send('acme', 'RESERVE_NOW', reserveNow({ reservation_id: 'R-3', ecurious_start: start + 3 * 60 * MIN, ecurious_blocks: 4 }));
+  assert.equal(later.data.result, 'ACCEPTED', 'a later slot on the same bay');
 
   const s = status('acme', 'r-1'); // OCPI ids are case-insensitive
   assert.equal(s.status, 200);
-  assert.equal(s.data.status, 'RESERVED');
+  assert.equal(s.data.status, 'LIVE');
   assert.equal(s.data.reservation_id, 'R-1');
   assert.equal(s.data.license_plate_hint, 'MA•••34');
   assert.equal(s.data.fees.total_cents, fee);
@@ -233,7 +239,7 @@ test('a partner reserves, retries safely, polls and cancels; other partners can 
   assert.equal(status('beta', 'R-1').status, 404, "another partner can't read it");
   const theirs = await send('beta', 'CANCEL_RESERVATION', { reservation_id: 'R-1' });
   assert.deepEqual([theirs.data.result, theirs.text], ['REJECTED', 'Unknown reservation_id']);
-  assert.equal(r.state(null).reservation?.status, 'reserved', "or cancel it");
+  assert.equal(status('acme', 'R-1').data.status, 'LIVE', 'or cancel it');
 
   const cancelled = await send('acme', 'CANCEL_RESERVATION', { response_url: 'https://emsp.example/cb', reservation_id: 'R-1' });
   assert.equal(cancelled.data.result, 'ACCEPTED');
@@ -246,19 +252,21 @@ test('a partner reserves, retries safely, polls and cancels; other partners can 
   assert.match((await send('acme', 'CANCEL_RESERVATION', { reservation_id: 'R-1' })).text, /already ended \(CANCELLED\)/);
   assert.match((await send('acme', 'RESERVE_NOW', reserveNow())).text, /already used/);
   assert.equal((await send('acme', 'START_SESSION', {})).data.result, 'NOT_SUPPORTED');
-  assert.deepEqual(calls, ['reserve', 'release']);
+  assert.deepEqual(calls, ['raise lock-0002'], 'cancelling leaves the guard up');
+  assert.equal(r.analytics().records.filter((b) => b.partner === 'acme').length, 2);
 });
 
 test("the camera recognises the partner's driver by plate, and the plate is gone once the session ends", async () => {
-  const { r, send, reserveNow, status } = setup();
-  await send('acme', 'RESERVE_NOW', reserveNow({ location_id: bayId.toLowerCase() }));
-  assert.deepEqual(await r.plateEvent('MAB1234'), { matched: true, matchedBy: 'exact' });
+  const { r, send, reserveNow, status, calls } = setup();
+  await send('acme', 'RESERVE_NOW', reserveNow({ location_id: bayId.toUpperCase() }));
+  assert.deepEqual(await r.plateEvent('bw-1', 'MAB1234'), { matched: true, matchedBy: 'exact' });
+  assert.deepEqual(calls, ['raise lock-0002', 'lower lock-0002']);
   const s = status('acme', 'R-1');
   assert.equal(s.data.status, 'ARRIVED');
   assert.ok(s.data.checked_in_at);
   assert.match((await send('acme', 'CANCEL_RESERVATION', { reservation_id: 'R-1' })).text, /already checked in/);
 
-  await r.plateEvent('MAB1234', 'out');
+  await r.vacated('bw-1');
   assert.deepEqual([status('acme', 'R-1').data.status, status('acme', 'R-1').data.license_plate_hint], ['COMPLETED', null]);
   assert.ok(!JSON.stringify(r.analytics()).includes('MAB1234'), 'plate erased from the record');
 });

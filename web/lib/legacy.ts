@@ -59,7 +59,8 @@ export function legacyFacade(schedule: Schedule, holidays: string[]) {
   const quote = (viewerId?: string | null) => {
     void viewerId;
     const fee = bookingFee(info.class, demandAt(earliestStart(Date.now()), { override: schedule.demand(), holidays }));
-    return { type: info.class as string, cents: fee.cents, demand: fee.demand, multiplier: fee.multiplier, prepaid: false, warning: null, noShowCents: fee.cents };
+    const type: ReservationType = info.class === 'slow' ? 'slow' : 'fast';
+    return { type, cents: fee.cents, demand: fee.demand, multiplier: fee.multiplier, prepaid: false, warning: null, noShowCents: fee.cents };
   };
   return { bay, holdMinutes: ARRIVAL_GRACE_MS / 60_000, reservations: { ...schedule, quote }, quote };
 }

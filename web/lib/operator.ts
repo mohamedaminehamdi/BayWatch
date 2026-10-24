@@ -1,15 +1,27 @@
 // Operator statistics over the last 7 calendar days, the "Simulate a week" demo data, and the hardware panel.
-// Pure functions: the reservation store hands in its records, nothing here touches state.
+// Pure functions: the engine (schedule.ts) hands in its records, nothing here touches state.
 
-import { cancellationFee, noShowFee, OVERSTAY_GRACE_MS, overstayFee, reservationFee, type ReservationType } from './booking-rules.ts';
-import { CHARGE_LABELS, CPO_SHARE, EXTENSION_MS, PRICES, total, type Charge } from './pricing.ts';
+import {
+  BLOCK_MS,
+  BLOCKED_CREDIT_CENTS,
+  bookingFee,
+  cancelCents,
+  CLASSES,
+  demandAt,
+  idleFee,
+  idleMinutes,
+  MIN_GAP_MS,
+  OVERSTAY_OPERATOR_SHARE,
+} from './booking-rules.ts';
+import type { BayInfo } from './bays.ts';
 import type { HardwareStatus } from './ecurious.ts';
-import type { Alert, Reservation, Status } from './reservation.ts';
+import { CPO_SHARE, RECEIPT, total } from './pricing.ts';
+import type { Alert, Booking } from './schedule.ts';
 
 const MIN = 60_000;
 const HOUR = 60 * MIN;
 const DAYS = 7;
-const TZ = 'Europe/Berlin'; // the bay's local day, so bars match the operator's calendar
+const TZ = 'Europe/Berlin'; // the bays' local day, so bars match the operator's calendar
 
 const dayKeyFormat = new Intl.DateTimeFormat('en-CA', { timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit' });
 export const dayKey = (at: number) => dayKeyFormat.format(at); // YYYY-MM-DD
@@ -22,40 +34,62 @@ export function lastDays(now: number) {
 
 export type Day = { day: string; total: number; completed: number; noShow: number; cancelled: number };
 
-export function weekStats(records: Reservation[], alerts: Alert[], now: number) {
+const overstayOf = (b: Booking) => b.charges.filter((c) => c.kind === 'overstay').reduce((sum, c) => sum + c.cents, 0);
+
+// Bookings count on the day of their start; walk-ups are counted apart, as they're free
+export function weekStats(records: Booking[], alerts: Alert[], now: number) {
   const days: Day[] = lastDays(now).map((day) => ({ day, total: 0, completed: 0, noShow: 0, cancelled: 0 }));
-  const inWeek = records.filter((r) => days.some((d) => d.day === dayKey(r.createdAt)));
-  for (const r of inWeek) {
-    const d = days.find((x) => x.day === dayKey(r.createdAt))!;
+  const inWeek = records.filter((r) => days.some((d) => d.day === dayKey(r.start)) && r.start <= now);
+  const bookings = inWeek.filter((r) => r.kind === 'booking');
+  for (const r of bookings) {
+    const d = days.find((x) => x.day === dayKey(r.start))!;
     d.total++;
     if (r.status === 'completed') d.completed++;
     if (r.status === 'no_show') d.noShow++;
     if (r.status === 'cancelled') d.cancelled++;
   }
 
-  const ended = inWeek.filter((r) => r.status === 'completed' || r.status === 'cancelled' || r.status === 'no_show');
+  const ended = bookings.filter((r) => r.status === 'completed' || r.status === 'cancelled' || r.status === 'no_show');
   const share = (n: number) => (ended.length ? n / ended.length : null);
-  const arrived = inWeek.filter((r) => r.arrivedAt);
+  const arrived = bookings.filter((r) => r.arrivedAt);
   const weekAlerts = alerts.filter((a) => days.some((d) => d.day === dayKey(a.since)));
   const revenueCents = inWeek.reduce((sum, r) => sum + total(r.charges), 0);
+  const overstayCents = inWeek.reduce((sum, r) => sum + overstayOf(r), 0);
+  const operatorOverstay = Math.round(overstayCents * OVERSTAY_OPERATOR_SHARE);
 
   return {
     days,
     simulated: inWeek.some((r) => r.simulated) || weekAlerts.some((a) => a.simulated),
     kpis: {
-      reservations: inWeek.length,
+      reservations: bookings.length,
+      walkups: inWeek.filter((r) => r.kind === 'walkup').length,
       ended: ended.length,
       completionRate: share(ended.filter((r) => r.status === 'completed').length),
       noShowRate: share(ended.filter((r) => r.status === 'no_show').length),
-      avgArriveMs: arrived.length ? arrived.reduce((sum, r) => sum + (r.arrivedAt! - r.createdAt), 0) / arrived.length : null,
+      avgArriveMs: arrived.length ? arrived.reduce((sum, r) => sum + (r.arrivedAt! - r.start), 0) / arrived.length : null, // vs the start
       blockedIncidents: weekAlerts.length,
       blockedMinutes: Math.round(weekAlerts.reduce((sum, a) => sum + ((a.resolvedAt ?? now) - a.since), 0) / MIN),
       cameraCheckIns: arrived.filter((r) => r.checkInMethod === 'camera').length,
       fallbackCheckIns: arrived.filter((r) => r.checkInMethod === 'fallback').length,
       fuzzyMatches: arrived.filter((r) => r.matchedBy === 'fuzzy').length,
-      revenueCents,
-      cpoShareCents: Math.round(revenueCents * CPO_SHARE),
+      revenueCents, // money drivers paid: fees after credit and refunds, plus idle fees
+      overstayCents,
+      overstaySplit: { operatorCents: operatorOverstay, platformCents: overstayCents - operatorOverstay },
+      creditsIssuedCents: inWeek.reduce((sum, r) => sum + r.creditGrantedCents, 0), // €5 for a blocked bay
+      creditsUsedCents: inWeek.reduce((sum, r) => sum + r.creditUsedCents, 0), // incl. free first reservations
+      cpoShareCents: Math.round((revenueCents - overstayCents) * CPO_SHARE) + operatorOverstay,
     },
+    bays: [...new Set(inWeek.map((r) => r.bayId))].sort().map((bayId) => {
+      const mine = inWeek.filter((r) => r.bayId === bayId);
+      return {
+        bayId,
+        reservations: mine.filter((r) => r.kind === 'booking').length,
+        completed: mine.filter((r) => r.kind === 'booking' && r.status === 'completed').length,
+        noShows: mine.filter((r) => r.status === 'no_show').length,
+        walkups: mine.filter((r) => r.kind === 'walkup').length,
+        revenueCents: mine.reduce((sum, r) => sum + total(r.charges), 0),
+      };
+    }),
   };
 }
 export type WeekStats = ReturnType<typeof weekStats>;
@@ -72,105 +106,113 @@ function random(seed: number) {
   };
 }
 
-// A plausible week of bookings for the demo, priced and charged by the same rules as real ones: about 70%
-// completed, the rest cancelled or no-shows; mostly camera check-ins with some misreads and fallbacks; the odd
-// blocked bay and overstay; fees across the demand tiers.
+// A plausible week on the Baywatch bays for the demo, priced and charged by the same rules as real bookings:
+// mostly completed, some cancelled at every tier, a few no-shows, walk-ups, the odd blocked bay (with its €5
+// credit) and overstay; camera check-ins with some misreads and fallbacks. Bookings never overlap on a bay.
 // Seed 11 is the default because it gives a representative mix of all of those.
-export function simulateWeek(
-  now: number,
-  { type, graceMs }: { type: ReservationType; graceMs: number },
-  seed = 11,
-): { records: Reservation[]; alerts: Alert[] } {
+export function simulateWeek(now: number, bays: Pick<BayInfo, 'id' | 'name' | 'real' | 'guard' | 'class'>[], seed = 11): { records: Booking[]; alerts: Alert[] } {
   const rnd = random(seed);
   const between = (lo: number, hi: number) => lo + rnd() * (hi - lo);
   const pick = <T,>(list: T[]) => list[Math.floor(rnd() * list.length)];
-  const demandMix = [0.15, 0.5, 0.5, 0.5, 0.8, 0.95]; // mostly normal, some quiet, busy and peak slots
-  const lengths = (type === 'fast' ? [30, 60, 90, 120] : [60, 120, 180, 240]).map((m) => m * MIN);
-  const records: Reservation[] = [];
+  const records: Booking[] = [];
   const alerts: Alert[] = [];
   let n = 0;
 
-  for (const day of lastDays(now)) {
-    const [y, m, d] = day.split('-').map(Number);
-    const noon = Date.UTC(y, m - 1, d, 11); // about noon in Berlin
-    const count = Math.floor(between(4, 10));
-    for (let i = 0; i < count; i++) {
-      const createdAt = Math.round(noon + between(-4.5, 7.5) * HOUR);
-      if (createdAt > now - 30 * MIN) continue; // nothing in the future, nothing still running
-      const roll = rnd();
-      const status: Status = roll < 0.7 ? 'completed' : roll < 0.86 ? 'cancelled' : 'no_show';
-      const fee = reservationFee(type, pick(demandMix));
-      const charges: Charge[] = [{ kind: 'reservation', label: CHARGE_LABELS.reservation(type, fee.demand), cents: fee.cents, at: createdAt }];
-      const r: Reservation = {
-        id: `sim-${day}-${i}`,
-        ownerId: `sim:driver-${++n}`,
-        plate: null,
-        extraPlate: null,
-        vehicleLabel: 'Simulated driver',
-        status,
-        type,
-        createdAt,
-        start: createdAt,
-        end: createdAt + pick(lengths),
-        expiresAt: createdAt + graceMs,
-        feeCents: fee.cents,
-        demand: fee.demand,
-        prepaid: false,
-        reminders: [],
-        sentReminders: [],
-        blockedSince: null,
-        blockedMs: 0,
-        charges,
-        simulated: true,
-      };
-      if (status === 'completed') {
-        if (rnd() < 0.15) {
-          r.extendedAt = createdAt + 5 * MIN;
-          r.expiresAt += EXTENSION_MS;
-          charges.push({ kind: 'extension', label: CHARGE_LABELS.extension(), cents: PRICES.extension, at: r.extendedAt });
+  for (const bay of bays) {
+    const max = CLASSES[bay.class].maxBlocks;
+    for (const day of lastDays(now)) {
+      const [y, m, d] = day.split('-').map(Number);
+      let start = Date.UTC(y, m - 1, d, 6) + Math.floor(between(0, 8)) * BLOCK_MS; // from about 07:00 in Berlin
+      const last = Date.UTC(y, m - 1, d, 20);
+      while (start < last) {
+        const blocks = Math.min(max, pick([2, 4, 4, 6, 8]));
+        const end = start + blocks * BLOCK_MS;
+        if (end + 30 * MIN > now) break; // nothing in the future, nothing still running
+        const roll = rnd();
+        const kind: Booking['kind'] = roll < 0.1 ? 'walkup' : 'booking';
+        const status: Booking['status'] = kind === 'walkup' || roll < 0.78 ? 'completed' : roll < 0.9 ? 'cancelled' : 'no_show';
+        const fee = kind === 'walkup' ? { cents: 0, demand: 'Normal' as const } : bookingFee(bay.class, demandAt(start));
+        const createdAt = kind === 'walkup' ? start : start - Math.round(between(0.2, 50)) * HOUR;
+        const firstFree = kind === 'booking' && rnd() < 0.06;
+        const r: Booking = {
+          id: `sim-${bay.id}-${++n}`,
+          bayId: bay.id,
+          bay: { name: bay.name, real: bay.real, guard: bay.guard, class: bay.class },
+          ownerId: `sim:driver-${n}`,
+          kind,
+          status,
+          plate: null,
+          extraPlate: null,
+          vehicleLabel: kind === 'walkup' ? 'Walk-up' : 'Simulated driver',
+          createdAt,
+          start,
+          end,
+          blocks,
+          feeCents: fee.cents,
+          demand: fee.demand,
+          creditUsedCents: firstFree ? fee.cents : 0,
+          firstFreeUsed: firstFree,
+          creditGrantedCents: 0,
+          blockedSince: null,
+          blockedMs: 0,
+          reminders: [],
+          sentReminders: [],
+          charges: [],
+          armed: true,
+          simulated: true,
+        };
+        const charge = (kindOf: Booking['charges'][number]['kind'], label: string, cents: number, at: number) => r.charges.push({ kind: kindOf, label, cents, at });
+        if (kind === 'booking') {
+          charge('reservation', RECEIPT.fee(bay.class, fee.demand), fee.cents, createdAt);
+          if (firstFree) charge('credit', RECEIPT.firstFree(), -fee.cents, createdAt);
         }
-        if (rnd() < 0.12) {
-          // another car stood in the bay for a while before the driver could check in
-          r.blockedMs = Math.round(between(3, 12) * MIN);
-          const since = createdAt + Math.round(between(1, 4) * MIN);
-          alerts.push({ id: `sim-alert-${r.id}`, since, reservationId: r.id, plate: null, status: 'resolved', resolvedAt: since + r.blockedMs, resolvedBy: rnd() < 0.6 ? 'camera' : 'operator', emailStatus: 'sent', simulated: true });
+        if (status === 'completed') {
+          if (kind === 'booking' && rnd() < 0.08) {
+            // another car stood in the bay for a while before the driver could check in
+            r.blockedMs = Math.round(between(3, 12)) * MIN;
+            r.creditGrantedCents = BLOCKED_CREDIT_CENTS;
+            const since = start - 5 * MIN;
+            alerts.push({ id: `sim-alert-${r.id}`, bayId: bay.id, since, bookingId: r.id, plate: null, status: 'resolved', resolvedAt: since + r.blockedMs, resolvedBy: rnd() < 0.6 ? 'sensor' : 'operator', emailStatus: 'sent', simulated: true });
+          }
+          r.arrivedAt = kind === 'walkup' ? start : start + Math.round(between(-8, 12)) * MIN + r.blockedMs;
+          const fallback = kind === 'booking' && rnd() < 0.1;
+          r.checkInMethod = kind === 'walkup' ? 'walkup' : fallback ? 'fallback' : 'camera';
+          if (r.checkInMethod === 'camera') r.matchedBy = rnd() < 0.12 ? 'fuzzy' : 'exact';
+          r.chargingAt = r.arrivedAt + Math.round(between(1, 3)) * MIN;
+          // most leave before the end, some overstay past the 5 free minutes; nobody leaves in the future
+          r.endedAt = Math.min(now - MIN, Math.max(r.chargingAt + 15 * MIN, end + Math.round(between(-30, 20)) * MIN));
+          const idle = idleFee(end, r.endedAt);
+          if (idle) charge('overstay', RECEIPT.idle(idleMinutes(end, r.endedAt)), idle, r.endedAt);
+        } else if (status === 'cancelled') {
+          r.endedAt = Math.min(start - MIN, createdAt + Math.round(between(1, Math.max(2, (start - createdAt) / MIN))) * MIN);
+          const due = cancelCents(fee.cents, { bookedAt: createdAt, start, at: r.endedAt });
+          if (!firstFree && fee.cents - due > 0) charge(due ? 'released' : 'refund', due ? RECEIPT.cancelRelease(due) : RECEIPT.refundAhead(), due - fee.cents, r.endedAt);
+        } else {
+          r.endedAt = start + 15 * MIN + MIN; // the arrival deadline passed: the whole fee is kept
         }
-        r.arrivedAt = createdAt + Math.round(between(4, 14) * MIN) + r.blockedMs;
-        const fallback = rnd() < 0.12;
-        r.checkInMethod = fallback ? 'fallback' : 'camera';
-        if (!fallback) r.matchedBy = rnd() < 0.12 ? 'fuzzy' : 'exact';
-        r.chargingAt = r.arrivedAt + Math.round(between(1, 3) * MIN);
-        // most leave before the session ends, some overstay; nobody leaves in the future
-        r.endedAt = Math.min(now - MIN, Math.max(r.chargingAt + 15 * MIN, r.end + Math.round(between(-40, 30) * MIN)));
-        const over = overstayFee(type, r.end, r.endedAt);
-        if (over) charges.push({ kind: 'overstay', label: CHARGE_LABELS.overstay(Math.ceil((r.endedAt - r.end - OVERSTAY_GRACE_MS) / MIN)), cents: over, at: r.endedAt });
-      } else if (status === 'cancelled') {
-        r.endedAt = createdAt + Math.round(between(0.5, 8) * MIN);
-        const kept = cancellationFee(fee.cents, { bookedAt: createdAt, start: createdAt, cancelledAt: r.endedAt });
-        const label = kept ? CHARGE_LABELS.cancelRelease(kept) : CHARGE_LABELS.refundEarly();
-        charges.push({ kind: kept ? 'released' : 'refund', label, cents: kept - total(charges), at: r.endedAt });
-      } else {
-        r.endedAt = r.expiresAt;
-        charges.push({ kind: 'released', label: CHARGE_LABELS.noShowRelease(), cents: noShowFee(fee.cents) - fee.cents, at: r.endedAt });
+        records.push(r);
+        start = blockAfter(Math.max(end, r.endedAt ?? end) + MIN_GAP_MS) + Math.floor(between(0, 6)) * BLOCK_MS;
       }
-      records.push(r);
     }
   }
   return { records, alerts };
 }
 
-// The live bay's hardware on the dashboard: the guard, what to warn about and, with real hardware, the device's
-// readings. `booked` = a booking is active; `time` formats a timestamp for the viewer. Never holds a plate.
-export function hardwarePanel(hw: HardwareStatus, booked: boolean, time: (at: number) => string) {
+const blockAfter = (t: number) => Math.ceil(t / BLOCK_MS) * BLOCK_MS;
+
+// A bay's hardware on the dashboard: the guard, what to warn about and, with real hardware, the device's
+// readings. `inSession`: a driver is checked in. `time` formats a timestamp for the viewer. Never holds a plate.
+// Between sessions the arm is meant to be up (booking v2), so an arm down with nobody in is the warning.
+export function hardwarePanel(hw: HardwareStatus, inSession: boolean, time: (at: number) => string) {
   const guard = hw.state === 'unknown' ? 'unknown' : hw.state === 'blocked' ? 'up' : 'down';
   const warnings = [
     hw.autoUnlock === 'any' && 'The camera lowers the arm for any car: the hold isn’t enforced.',
-    hw.state === 'blocked' && !booked && 'Arm up without a booking.',
+    !hw.mock && hw.state === 'free' && !inSession && 'The arm is down with nobody checked in: the bay isn’t guarded.',
   ].filter((w): w is string => !!w);
   const rows: [string, string][] = hw.mock
     ? []
     : [
-        ['Bay', hw.lockId ?? '–'],
+        ['Lock', hw.lockId ?? '–'],
         ['Car sensor', hw.carPresence ?? '–'],
         ['Live events', hw.events ? 'on' : 'off'],
         ['12 V battery', hw.battery12V == null ? '–' : `${hw.battery12V.toFixed(1)} V`],

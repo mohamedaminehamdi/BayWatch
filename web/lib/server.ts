@@ -7,7 +7,7 @@ import { fail } from './errors';
 import { chargerById, chargersNear } from './goingelectric';
 import { legacyFacade, legacyState } from './legacy';
 import { emailBlockedBay, operatorEmails } from './notify';
-import { operatorBays, weekStats } from './operator';
+import { weekStats } from './operator';
 import { settleBooking } from './payments';
 import { createSchedule, type Schedule } from './schedule';
 
@@ -113,7 +113,7 @@ export type AppState = Awaited<ReturnType<typeof appState>>;
 export async function operatorData() {
   const { records, alerts } = schedule.analytics();
   const bays = await Promise.all(schedule.realBays().map(async (b) => ({ ...schedule.operatorBay(b.id), hardware: await hardwareStatus(b.id) })));
-  return { simulator, bays: operatorBays(bays), alerts: schedule.alerts(), log: schedule.log(), stats: weekStats(records, alerts, Date.now()) };
+  return { simulator, bays, alerts: schedule.alerts(), log: schedule.log(), stats: weekStats(records, alerts, Date.now()) };
 }
 export type OperatorData = Awaited<ReturnType<typeof operatorData>>;
 
