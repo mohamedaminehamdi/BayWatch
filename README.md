@@ -1,5 +1,7 @@
 # Ecurious Reserve
 
+**link**https://app.notion.com/p/BayWatch-4032e6d9e3bb8033b730de17ef7f7b33?source=copy_link
+
 **Your charging spot, kept free.** A charging app for public EV charging that reserves a bay with Ecurious hardware and checks you in by license plate when you arrive. Built for the Ecurious challenge at the Watt the Hack hackathon.
 
 **Status (2026-10-24):**
