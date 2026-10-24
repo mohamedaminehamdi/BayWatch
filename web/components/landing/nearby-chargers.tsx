@@ -34,7 +34,7 @@ export async function NearbyChargers() {
         </h2>
         <p className="mt-6 max-w-[46ch] text-lg text-muted">
           Every one of these can be taken, broken or blocked by the time you arrive. You only find out when you get
-          there. The bay with the bolt is the one an Ecurious guard keeps free for whoever booked it.
+          there. The bay with the bolt is the one a Baywatch guard keeps free for whoever booked it.
         </p>
         <p className="mt-4 font-mono text-xs uppercase tracking-[0.08em] text-muted">
           Live data from{' '}

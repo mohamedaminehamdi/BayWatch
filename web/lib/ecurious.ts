@@ -1,20 +1,23 @@
-// Ecurious hardware adapter for the test bay: a Chang Cheng CC5S ground lock (barrier arm, car sensor and
-// plate camera) behind the Ecurious server. reserve() raises the arm for the booked driver, release() lowers
-// it and keeps it down, status() reads the arm, the car sensor and the device's health, cached for a few
-// seconds. The mapping and the reasons for it are in docs/hardware-integration.md.
+// Ecurious hardware adapter: the team's Chang Cheng CC5S ground locks (barrier arm, car sensor and plate
+// camera) behind the Ecurious server, one per Baywatch bay. raise() puts the arm up (never onto a car, never
+// on an offline lock), lower() takes it down and keeps it down, status() reads the arm, the car sensor and
+// the device's health, cached for a few seconds. Every call names its lock, and only the team's own locks
+// (GET /locks) are ever called. The mapping and the reasons for it are in docs/hardware-integration.md.
 //
 // Live only with ECURIOUS_API_KEY *and* ECURIOUS_LIVE=1, and ECURIOUS_MOCK=1 always forces the mock: the key
-// sits in .env, and a dev server must never move the real arm unless someone opted in.
+// sits in .env, and a dev server must never move a real arm unless someone opted in.
+import { DEFAULT_BAYS } from './bays.ts';
 import type { HwEvent } from './ecurious-events.ts';
 
 const BASE = 'https://parking-lock-service-production.up.railway.app/api/v1';
 const READ_TIMEOUT_MS = 5_000;
 const WRITE_TIMEOUT_MS = 8_000; // a command crosses the server's TCP gateway and the device's 4G link
 const READ_BACKOFF_MS = [300, 1_000]; // reads retry twice; writes never: the arm may already be moving
-const STATUS_TTL_MS = 5_000; // every client polls /api/state every 2 s: read the hardware at most every 5 s
-const WRITE_COOLDOWN_MS = 30_000; // after a failed command, refuse new ones for a while instead of looping
+const STATUS_TTL_MS = 5_000; // clients poll every 2 s: read each lock at most every 5 s
+const TEAM_TTL_MS = 5 * 60_000; // the team's lock list
+const WRITE_COOLDOWN_MS = 30_000; // after a failed command, refuse new ones to that lock for a while
 
-// A bay as GET /api/v1/locks returns it
+// A lock as GET /api/v1/locks returns it
 export type Lock = {
   id: string;
   name?: string;
@@ -51,22 +54,22 @@ export type HardwareStatus = {
   updatedAt?: number | null;
 };
 
-type Cache = {
-  lockId?: string;
+type LockCache = {
   lock?: Lock;
   okAt: number; // last successful read
   triedAt: number; // last read attempt
   reading?: Promise<void>;
   error?: string;
-  events: boolean;
   failedAt: number; // last failed command
-  mock: 'free' | 'blocked';
+  mock: 'free' | 'blocked'; // the mock's arm: up between sessions, like a real bay
 };
+type Cache = { locks: Record<string, LockCache>; team?: { ids: string[]; at: number }; teamReading?: Promise<string[]>; events: boolean };
 
 // On globalThis: instrumentation.ts (the event bridge) and the route handlers are bundled separately, so each
 // gets its own copy of this module, and they must share one cache. Bump the key if the shape changes.
-const g = globalThis as typeof globalThis & { ecurious_v1?: Cache };
-const cache = () => (g.ecurious_v1 ??= { okAt: 0, triedAt: 0, events: false, failedAt: 0, mock: 'free' });
+const g = globalThis as typeof globalThis & { ecurious_v2?: Cache };
+const cache = () => (g.ecurious_v2 ??= { locks: {}, events: false });
+const lockCache = (id: string) => (cache().locks[id] ??= { okAt: 0, triedAt: 0, failedAt: 0, mock: 'blocked' });
 
 export const live = () =>
   !!process.env.ECURIOUS_API_KEY && process.env.ECURIOUS_LIVE === '1' && process.env.ECURIOUS_MOCK !== '1';
@@ -107,25 +110,45 @@ export async function call<T>(method: 'GET' | 'POST', path: string, body?: objec
 export const openEvents = (signal: AbortSignal) =>
   fetch(`${BASE}/events`, { headers: { 'x-api-key': key(), accept: 'text/event-stream' }, signal });
 
-// ECURIOUS_LOCK_ID, else the team's first bay. Either way it must be one of the team's own bays (fair play).
-export async function lockId() {
+// The team's own locks, cached for a few minutes. Every call checks it first (fair play): a lock the team
+// doesn't have any more, like lock-0001, is never called.
+export async function teamLocks(): Promise<string[]> {
   const c = cache();
-  if (c.lockId) return c.lockId;
-  const { locks = [] } = await call<{ locks?: Lock[] }>('GET', '/locks');
-  const want = process.env.ECURIOUS_LOCK_ID || locks[0]?.id;
-  const lock = locks.find((l) => l.id === want);
-  if (!lock) throw hwError(want ? `${want} is not one of this team's bays` : 'No bays are assigned to this team');
-  if (!process.env.ECURIOUS_LOCK_ID) console.warn(`[ecurious] ECURIOUS_LOCK_ID unset: using the team's first bay, ${lock.id}`);
-  Object.assign(c, { lockId: lock.id, lock, okAt: Date.now() });
-  return lock.id;
+  if (c.team && Date.now() - c.team.at < TEAM_TTL_MS) return c.team.ids;
+  c.teamReading ??= call<{ locks?: Lock[] }>('GET', '/locks')
+    .then(({ locks = [] }) => {
+      c.team = { ids: locks.map((l) => l.id), at: Date.now() };
+      for (const l of locks) Object.assign(lockCache(l.id), { lock: l, okAt: Date.now(), triedAt: Date.now(), error: undefined });
+      return c.team.ids;
+    })
+    .finally(() => (c.teamReading = undefined));
+  return c.teamReading;
 }
 
-const lockPath = async () => `/locks/${encodeURIComponent(await lockId())}`;
+async function assertTeam(lockId: string) {
+  if (!(await teamLocks()).includes(lockId)) throw hwError(`${lockId} is not one of this team's bays`);
+}
 
-async function read() {
-  const c = cache();
+// The lock status() reads when none is named: ECURIOUS_LOCK_ID, else the first lock in ECURIOUS_BAYS
+const defaultLock = () => process.env.ECURIOUS_LOCK_ID || /lock-\d{4}/.exec(process.env.ECURIOUS_BAYS ?? DEFAULT_BAYS)?.[0] || '';
+
+// For the CLI: ECURIOUS_LOCK_ID, else the team's first lock. Either way one of the team's own.
+export async function lockId() {
+  const ids = await teamLocks();
+  const want = process.env.ECURIOUS_LOCK_ID || ids[0];
+  if (!want) throw hwError('No bays are assigned to this team');
+  if (!ids.includes(want)) throw hwError(`${want} is not one of this team's bays`);
+  if (!process.env.ECURIOUS_LOCK_ID) console.warn(`[ecurious] ECURIOUS_LOCK_ID unset: using the team's first bay, ${want}`);
+  return want;
+}
+
+const lockPath = (id: string) => `/locks/${encodeURIComponent(id)}`;
+
+async function read(id: string) {
+  const c = lockCache(id);
   try {
-    const { lock } = await call<{ lock: Lock }>('GET', await lockPath());
+    await assertTeam(id);
+    const { lock } = await call<{ lock: Lock }>('GET', lockPath(id));
     Object.assign(c, { lock, okAt: Date.now(), error: undefined });
   } catch (e) {
     c.error = (e as Error).message;
@@ -137,14 +160,14 @@ async function read() {
 
 const ARM_RAW: Record<number, string> = { 1: 'raised', 2: 'lowered' };
 
-function view(c: Cache): HardwareStatus {
+function view(id: string, c: LockCache): HardwareStatus {
   const l = c.lock;
   const arm = l?.status === 'offline' ? ARM_RAW[l.deviceStatusRaw ?? 0] : l?.status;
   const wl = l?.whitelist;
   return {
     state: arm === 'raised' ? 'blocked' : arm === 'lowered' ? 'free' : 'unknown',
     mock: false,
-    lockId: c.lockId,
+    lockId: id,
     name: l?.name,
     online: !!l && l.status !== 'offline',
     carPresence: l?.carPresence === 'occupied' || l?.carPresence === 'vacant' ? l.carPresence : null,
@@ -155,54 +178,54 @@ function view(c: Cache): HardwareStatus {
     waterIngress: l?.waterIngress ?? null,
     activeErrors: l?.activeErrors ?? [],
     lastSeenAt: l?.lastSeenAt ?? null,
-    events: c.events,
+    events: cache().events,
     stale: !!c.error,
     error: c.error,
     updatedAt: c.okAt || null,
   };
 }
 
-// Never throws and never waits on the hardware once it has been read: a stale value is served while it
+// Never throws and never waits on the hardware once a lock has been read: a stale value is served while it
 // re-reads in the background, and events (noteEvent) keep it current in between
-export async function status(): Promise<HardwareStatus> {
-  const c = cache();
+export async function status(id: string = defaultLock()): Promise<HardwareStatus> {
+  const c = lockCache(id);
   if (!live()) return { state: c.mock, mock: true };
   if (!c.reading && Date.now() - c.triedAt > STATUS_TTL_MS) {
-    c.reading = read()
+    c.reading = read(id)
       .catch(() => {})
       .finally(() => (c.reading = undefined));
   }
   if (!c.lock) await c.reading;
-  return view(c);
+  return view(id, c);
 }
 
-// Raise the arm and keep it up for the booked driver. `plates` (the booked car) go on the camera's list when
-// ECURIOUS_WHITELIST=1. Refuses an offline bay, and never raises the arm under a car.
-export async function reserve(plates: string[] = []) {
-  if (!live()) return void (cache().mock = 'blocked');
-  await read(); // fresh, not cached: this decides whether the arm may go up
-  const l = cache().lock!;
+// Raise the arm and keep it up. Refuses an offline lock, and never raises the arm under a car. `plates` (the
+// booked car) go on the camera's list with ECURIOUS_WHITELIST=1; otherwise the list is emptied, so the camera
+// lowers the arm for nobody (the default ['*'] would let any car in).
+export async function raise(id: string, plates: string[] = []) {
+  if (!live()) return void (lockCache(id).mock = 'blocked');
+  await read(id); // fresh, not cached: this decides whether the arm may go up
+  const l = lockCache(id).lock!;
   if (l.status === 'offline') throw hwError(`${l.name ?? l.id} is offline (last seen ${l.lastSeenAt ?? 'never'})`);
   if (l.carPresence !== 'vacant') throw hwError('A car is over the arm, so it was not raised');
-  await command('lock', 'raised');
-  // during a hold the camera may lower the arm for the booked car only, or for nobody: never for any car
-  await setAutoUnlock(process.env.ECURIOUS_WHITELIST === '1' ? plates : []);
+  if (l.status !== 'raised') await command(id, 'lock', 'raised');
+  await setPlates(id, process.env.ECURIOUS_WHITELIST === '1' ? plates : []);
 }
 
-// Lower the arm and keep it down (cancelAutoLift): it must not rise again under the car, nor after the car
-// leaves, when the bay is open to anyone
-export async function release() {
-  if (!live()) return void (cache().mock = 'free');
-  await command('unlock', 'lowered');
-  await setAutoUnlock([]);
+// Lower the arm and keep it down (cancelAutoLift): it must not rise again under the car
+export async function lower(id: string) {
+  if (!live()) return void (lockCache(id).mock = 'free');
+  await assertTeam(id);
+  await command(id, 'unlock', 'lowered');
+  await setPlates(id, []);
 }
 
-async function command(action: 'lock' | 'unlock', arm: 'raised' | 'lowered') {
-  const c = cache();
+async function command(id: string, action: 'lock' | 'unlock', arm: 'raised' | 'lowered') {
+  const c = lockCache(id);
   const wait = c.failedAt + WRITE_COOLDOWN_MS - Date.now();
-  if (wait > 0) throw hwError(`The last bay command failed, try again in ${Math.ceil(wait / 1000)} s`);
+  if (wait > 0) throw hwError(`The last command to ${id} failed, try again in ${Math.ceil(wait / 1000)} s`);
   try {
-    await call('POST', `${await lockPath()}/${action}`, { cancelAutoLift: true });
+    await call('POST', `${lockPath(id)}/${action}`, { cancelAutoLift: true });
   } catch (e) {
     c.failedAt = Date.now();
     c.triedAt = 0; // it may have moved anyway: re-read on the next status()
@@ -211,27 +234,29 @@ async function command(action: 'lock' | 'unlock', arm: 'raised' | 'lowered') {
   if (c.lock) c.lock.status = arm; // the status_change event and the next read confirm it
 }
 
-// The camera's own plate list (it lowers the arm itself for these). Best effort: if it fails, our own
-// plate match still checks the driver in, and status() shows autoUnlock so the operator sees it.
-async function setAutoUnlock(plates: string[]) {
-  const c = cache();
+// The camera's own plate list (it lowers the arm itself for these). Best effort: if it fails, our own plate
+// match still checks the driver in, and status() shows autoUnlock so the operator sees it.
+export async function setPlates(id: string, plates: string[]) {
+  if (!live()) return;
+  const c = lockCache(id);
   const now = c.lock?.whitelist;
   if (now && now.length === plates.length && plates.every((p) => now.includes(p))) return;
   try {
-    const res = await call<{ whitelist?: string[] }>('POST', `${await lockPath()}/whitelist`, { plates });
+    await assertTeam(id);
+    const res = await call<{ whitelist?: string[] }>('POST', `${lockPath(id)}/whitelist`, { plates });
     if (c.lock) c.lock.whitelist = res.whitelist ?? plates;
-    if (plates.some((p) => !res.whitelist?.includes(p))) console.warn('[ecurious] the camera did not store every plate sent');
+    if (plates.some((p) => !res.whitelist?.includes(p))) console.warn(`[ecurious] the camera of ${id} did not store every plate sent`);
   } catch (e) {
     c.triedAt = 0;
-    console.warn(`[ecurious] camera plate list not updated: ${(e as Error).message}`);
+    console.warn(`[ecurious] camera plate list of ${id} not updated: ${(e as Error).message}`);
   }
 }
 
 // From the event bridge: keeps the cached status current between reads
 export function noteEvent(e: HwEvent) {
-  const c = cache();
-  const l = c.lock;
-  if (!l || e.lockId !== l.id) return;
+  const c = cache().locks[e.lockId];
+  const l = c?.lock;
+  if (!l) return;
   if (e.type === 'arm') l.status = e.arm;
   if (e.type === 'presence') l.carPresence = e.presence;
   if (e.type === 'alarm') l.activeErrors = [...new Set([...(l.activeErrors ?? []), e.error])];

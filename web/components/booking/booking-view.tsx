@@ -6,7 +6,7 @@ import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'rea
 import { api } from '@/components/api';
 import { useAppState } from '@/components/app/app-state';
 import { formatCountdown, formatTime, useNow } from '@/components/time';
-import { Button, buttonClass } from '@/components/ui/button';
+import { Button, buttonClass, chipClass } from '@/components/ui/button';
 import { Dialog } from '@/components/ui/dialog';
 import { EmptyState } from '@/components/ui/empty-state';
 import { Field, inputClass } from '@/components/ui/field';
@@ -33,8 +33,8 @@ const duration = (ms: number) => formatLength(Math.max(1, Math.round(ms / MIN)))
 
 function Banner({ tone, icon: Icon, children }: { tone: 'info' | 'warn'; icon: typeof Clock; children: ReactNode }) {
   return (
-    <div role="status" className={`flex gap-3 rounded-2xl p-4 ${tone === 'warn' ? 'bg-warn-tint text-warn' : 'bg-brand-tint text-brand-strong'}`}>
-      <Icon className="mt-0.5 size-5 shrink-0" />
+    <div role="status" className={`flex gap-3 rounded-2xl p-4 text-ink ${tone === 'warn' ? 'bg-warn-tint' : 'bg-accent-tint'}`}>
+      <Icon className={`mt-0.5 size-5 shrink-0 ${tone === 'warn' ? 'text-warn' : 'text-accent'}`} />
       <div className="font-medium">{children}</div>
     </div>
   );
@@ -74,7 +74,7 @@ export function BookingView() {
             </Link>
           }
         >
-          Reserve the Ecurious bay and it’s held free for you while you drive there.
+          Book a Baywatch bay and it’s held free for you while you drive there.
         </EmptyState>
       </div>
     );
@@ -100,15 +100,15 @@ export function BookingView() {
     <div className="mx-auto w-full max-w-2xl px-5 py-6 sm:py-10">
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
-          <p className="text-sm font-semibold text-muted">Your booking</p>
-          <h1 className="font-display text-3xl leading-tight">{state.bay.name}</h1>
+          <p className="font-mono text-xs font-medium uppercase tracking-[0.12em] text-muted">Your booking</p>
+          <h1 className="mt-1 font-display text-4xl leading-[0.95] tracking-[0.012em]">{state.bay.name}</h1>
           <p className="text-muted">
             {state.bay.address} · {state.bay.powerKw} kW
           </p>
         </div>
         {!ended && (
           <a href={directionsUrl(state.bay)} target="_blank" rel="noopener" className={buttonClass('secondary', 'md')}>
-            <Navigation className="size-4" /> Navigate
+            <Navigation className="size-4" /> Navigate by car
           </a>
         )}
       </div>
@@ -168,8 +168,8 @@ function SessionFacts({ r, now, cancelling }: { r: ReservationView; now: number;
     <dl className="grid gap-x-6 gap-y-3 border-t border-line pt-5 first:border-t-0 first:pt-0 sm:grid-cols-2">
       {rows.map(([k, v]) => (
         <div key={k}>
-          <dt className="text-sm text-muted">{k}</dt>
-          <dd className="font-semibold">{v}</dd>
+          <dt className="font-mono text-xs font-medium uppercase tracking-[0.1em] text-muted">{k}</dt>
+          <dd className="mt-0.5 font-semibold">{v}</dd>
         </div>
       ))}
     </dl>
@@ -209,7 +209,7 @@ function NotifyMe() {
     <button
       type="button"
       onClick={() => Notification.requestPermission().then(() => setAsk(false))}
-      className="justify-self-start text-sm font-semibold text-brand-strong underline underline-offset-2"
+      className="inline-flex min-h-11 items-center justify-self-start text-sm font-semibold text-accent underline underline-offset-2"
     >
       Get a notification before your session ends
     </button>
@@ -235,42 +235,49 @@ function Reserved({
 }) {
   return (
     <>
-      {r.unreadableAt && (
+      {r.carAtBay && (
         <Banner tone="info" icon={ScanLine}>
           The camera saw a car but couldn’t read its plate. If that’s you, tap “I’m at the bay”.
         </Banner>
       )}
 
-      <section className="rounded-3xl bg-surface p-6 ring-1 ring-line sm:p-8">
-        <span className="inline-flex items-center gap-1.5 rounded-full bg-brand-tint px-3 py-1 text-sm font-semibold text-brand-strong">
-          <span className="size-2 rounded-full bg-brand" /> Held for you
+      <section className="rounded-3xl bg-brand-deep p-6 text-on-brand sm:p-8">
+        <span className={`${chipClass} bg-signal text-ink`}>
+          <span className="size-2 rounded-full bg-ink" /> Held for you
         </span>
-        <p className="mt-3 font-display text-7xl leading-none tabular-nums tracking-tight sm:text-8xl">{formatCountdown(r.expiresAt - now)}</p>
-        <p className="mt-2 text-lg text-muted">
-          left to arrive · <span className="font-semibold text-ink">arrive by {formatTime(r.expiresAt)}</span>
-          {r.extendedAt ? ' (extended)' : ''}
+        <p className="mt-4 font-display text-8xl leading-[0.85] text-signal sm:text-9xl">{formatCountdown(r.expiresAt - now)}</p>
+        <p className="mt-3 font-mono text-sm uppercase tracking-[0.08em] text-on-brand-muted">
+          left to arrive · <span className="font-semibold text-on-brand">arrive by {formatTime(r.expiresAt)}</span>
+          {r.extendedAt ? ' · extended' : ''}
         </p>
-        <div className="mt-6 flex flex-wrap items-center gap-3">
-          <CarFront className="size-5 text-muted" />
+        <div className="mt-6 flex flex-wrap items-center gap-3 border-t border-white/14 pt-5">
+          <CarFront className="size-5 text-on-brand-muted" />
           <span className="font-semibold">{r.vehicleLabel}</span>
           {r.plateHint && <PlateBadge plate={r.plateHint} size="sm" />}
           {r.extraPlateHint && (
-            <span className="flex items-center gap-2 text-sm text-muted">
+            <span className="flex items-center gap-2 text-sm text-on-brand-muted">
               and today <PlateBadge plate={r.extraPlateHint} size="sm" />
             </span>
           )}
         </div>
-        <p className="mb-5 mt-3 text-sm text-muted">The guard is up. When you drive in, the camera reads your plate and lowers it.</p>
+        <p className="mt-3 text-sm text-on-brand-muted">The guard is up. When you drive in, the camera reads your plate and lowers it.</p>
+      </section>
+      <section className="rounded-2xl bg-surface p-6 ring-1 ring-line">
         <SessionFacts r={r} now={now} cancelling />
       </section>
 
       <div className="grid gap-3 sm:grid-cols-2">
         <a href={directionsUrl(state.bay)} target="_blank" rel="noopener" className={buttonClass('primary', 'lg', 'sm:col-span-2')}>
-          <Navigation className="size-5" /> Navigate to the bay
+          <Navigation className="size-5" /> Navigate by car
         </a>
-        <Button variant="secondary" size="lg" loading={busy === 'checkin'} onClick={onCheckIn}>
-          <MapPin className="size-5" /> I’m at the bay
-        </Button>
+        {/* the fallback check-in only opens once the bay's hardware has seen a car (server-checked too) */}
+        {r.carAtBay ? (
+          <Button variant="secondary" size="lg" loading={busy === 'checkin'} onClick={onCheckIn}>
+            <MapPin className="size-5" /> I’m at the bay
+          </Button>
+        ) : (
+          <p className="self-center px-2 text-sm text-muted">Plate not read? Once the camera has seen your car, you can check in here.</p>
+        )}
         <Button variant="secondary" size="lg" loading={busy === 'extend'} disabled={!!r.extendedAt} onClick={() => onStep('extend', 'extend')}>
           <Timer className="size-5" /> {r.extendedAt ? `Extended by ${EXTENSION_MIN} min` : `+${EXTENSION_MIN} min · ${formatEuro(PRICES.extension)}`}
         </Button>
@@ -311,9 +318,9 @@ function Blocked({ r, state, busy, onCancel }: { r: ReservationView; state: AppS
     <>
       <section className="rounded-3xl bg-warn-tint p-6 text-ink sm:p-8">
         <TriangleAlert className="size-8 text-warn" />
-        <h2 className="mt-3 font-display text-3xl">Another car is in your bay</h2>
+        <h2 className="mt-3 font-display text-4xl leading-[0.95] tracking-[0.012em]">Another car is in your bay</h2>
         <p className="mt-2 text-lg">
-          Your hold is paused with <span className="font-semibold tabular-nums">{formatCountdown(paused)}</span> left, so you lose no time.
+          Your hold is paused with <span className="font-mono font-semibold">{formatCountdown(paused)}</span> left, so you lose no time.
           We’ve alerted the operator.
         </p>
         <p className="mt-1 text-muted">Since {formatTime(r.blockedSince ?? 0)}. If you cancel now, it’s free.</p>
@@ -334,8 +341,8 @@ function Blocked({ r, state, busy, onCancel }: { r: ReservationView; state: AppS
       )}
 
       {choice === 'other' && (
-        <section className="rounded-3xl bg-surface p-6 ring-1 ring-line">
-          <h3 className="font-display text-xl">Nearest public chargers</h3>
+        <section className="rounded-2xl bg-surface p-6 ring-1 ring-line">
+          <h3 className="font-display text-2xl leading-none tracking-[0.012em]">Nearest public chargers</h3>
           <p className="text-sm text-muted">Not reservable: first come, first served.</p>
           {nearby === null ? (
             <div className="mt-4 h-40 animate-pulse rounded-2xl bg-sunken" />
@@ -345,7 +352,7 @@ function Blocked({ r, state, busy, onCancel }: { r: ReservationView; state: AppS
                 <li key={c.id} className="flex items-center gap-3 py-3">
                   <span className="min-w-0 flex-1">
                     <span className="block truncate font-medium">{c.name}</span>
-                    <span className="text-sm text-muted">
+                    <span className="font-mono text-[0.8125rem] text-muted">
                       {Math.max(0, ...c.points.map((p) => p.power))} kW · {formatDistance(c.distance)}
                     </span>
                   </span>
@@ -383,15 +390,15 @@ function Arrived({ r, state, now, busy, onCharge }: { r: ReservationView; state:
   return (
     <>
       <SessionReminder r={r} bayName={state.bay.name} />
-      <section className="rounded-3xl bg-brand-deep p-6 text-white sm:p-8">
-        <CircleCheck className="size-9 text-mint" />
-        <h2 className="mt-3 font-display text-4xl">You’re checked in</h2>
+      <section className="rounded-3xl bg-brand-deep p-6 text-on-brand sm:p-8">
+        <CircleCheck className="size-9 text-mint" strokeWidth={1.5} />
+        <h2 className="mt-3 font-display text-4xl leading-[0.9] tracking-[0.012em]">You’re checked in</h2>
         <p className="mt-2 text-lg text-on-brand">
           {how} The guard is down: park and plug in.
         </p>
-        {r.arrivedAt && <p className="mt-1 text-on-brand-muted">Arrived at {formatTime(r.arrivedAt)}</p>}
+        {r.arrivedAt && <p className="mt-2 font-mono text-sm uppercase tracking-[0.08em] text-on-brand-muted">Arrived at {formatTime(r.arrivedAt)}</p>}
       </section>
-      <section className="rounded-3xl bg-surface p-6 ring-1 ring-line">
+      <section className="rounded-2xl bg-surface p-6 ring-1 ring-line">
         <SessionFacts r={r} now={now} />
       </section>
       <Button size="lg" loading={busy === 'charge'} onClick={onCharge}>
@@ -408,20 +415,23 @@ function Charging({ r, state, now, busy, onFinish }: { r: ReservationView; state
   return (
     <>
       <SessionReminder r={r} bayName={state.bay.name} />
-      <section className="rounded-3xl bg-surface p-6 ring-1 ring-line sm:p-8">
-        <span className="inline-flex items-center gap-1.5 rounded-full bg-brand-tint px-3 py-1 text-sm font-semibold text-brand-strong">
+      <section className="rounded-3xl bg-brand-deep p-6 text-on-brand sm:p-8">
+        <span className={`${chipClass} bg-signal text-ink`}>
           <PlugZap className="size-4" /> Charging
         </span>
-        <p className="mt-3 font-display text-7xl leading-none tabular-nums tracking-tight">{elapsed(now - (r.chargingAt ?? now))}</p>
-        <p className="mb-5 mt-2 text-lg text-muted">
+        <p className="mt-4 font-display text-8xl leading-[0.85] text-signal sm:text-9xl">{elapsed(now - (r.chargingAt ?? now))}</p>
+        <p className="mt-3 text-lg text-on-brand-muted">
           since {formatTime(r.chargingAt ?? 0)} ·{' '}
           {left > 0 ? (
             `session ends at ${formatTime(r.end)}, in ${formatLength(Math.ceil(left / MIN))}`
           ) : (
-            <span className="font-semibold text-warn">your session has ended</span>
+            // warn orange is too dark to read on ink, so the ended state is bold paper
+            <span className="font-semibold text-on-brand">your session has ended</span>
           )}
           . When you drive off, the camera ends it.
         </p>
+      </section>
+      <section className="rounded-2xl bg-surface p-6 ring-1 ring-line">
         <SessionFacts r={r} now={now} />
       </section>
       <Button size="lg" loading={busy === 'finish'} onClick={onFinish}>
@@ -447,11 +457,10 @@ function doneText(r: ReservationView) {
       text: total ? `The guard is down and the bay is free again. Cancelling cost ${formatEuro(total)}; the rest was returned.` : 'The guard is down and the bay is free again. Nothing was charged.',
     };
   }
+  const by = `You didn’t arrive by ${formatTime(r.expiresAt)}, so the bay went to the next driver.`;
   return {
     title: 'You didn’t arrive in time',
-    text: r.prepaid
-      ? `The bay was released for other drivers. You had prepaid, so the ${formatEuro(total)} is kept.`
-      : `The bay was released for other drivers. You pay half the fee, ${formatEuro(total)}; the rest was returned.`,
+    text: r.prepaid ? `${by} The ${formatEuro(total)} you prepaid is kept.` : `${by} You pay ${formatEuro(total)}; the rest of the fee was returned.`,
   };
 }
 
@@ -466,20 +475,20 @@ function Done({ r }: { r: ReservationView }) {
 
   return (
     <>
-      <section className="rounded-3xl bg-surface p-6 ring-1 ring-line sm:p-8">
-        <h2 className="font-display text-4xl">{d.title}</h2>
+      <section className="rounded-2xl bg-surface p-6 ring-1 ring-line sm:p-8">
+        <h2 className="font-display text-4xl leading-[0.9] tracking-[0.012em]">{d.title}</h2>
         <p className="mt-2 text-lg text-muted">{d.text}</p>
         <dl className="mt-6 grid grid-cols-2 gap-x-6 gap-y-3 border-t border-line pt-5 sm:grid-cols-4">
           {rows.map(([k, v]) => (
             <div key={k}>
-              <dt className="text-sm text-muted">{k}</dt>
-              <dd className="font-semibold tabular-nums">{v}</dd>
+              <dt className="font-mono text-xs font-medium uppercase tracking-[0.1em] text-muted">{k}</dt>
+              <dd className="mt-0.5 font-mono text-lg font-semibold">{v}</dd>
             </div>
           ))}
         </dl>
       </section>
-      <section className="rounded-3xl bg-surface p-6 ring-1 ring-line sm:p-8">
-        <h3 className="mb-4 font-display text-xl">Receipt</h3>
+      <section className="rounded-2xl bg-surface p-6 ring-1 ring-line sm:p-8">
+        <h3 className="mb-4 font-display text-2xl leading-none tracking-[0.012em]">Receipt</h3>
         <Receipt charges={r.charges ?? []} totalCents={r.totalCents ?? 0} />
       </section>
       <div className="flex flex-wrap gap-3">
@@ -538,7 +547,7 @@ function OtherCarDialog({ open, busy, onClose, onSubmit }: { open: boolean; busy
             autoComplete="off"
             autoCapitalize="characters"
             placeholder="B XY 123"
-            className={`${inputClass} font-mono text-lg font-semibold tracking-[0.06em]`}
+            className={`${inputClass} font-mono text-lg font-semibold uppercase tracking-[0.06em]`}
           />
         </Field>
         <label className="flex cursor-pointer gap-3 rounded-2xl bg-sunken p-4">

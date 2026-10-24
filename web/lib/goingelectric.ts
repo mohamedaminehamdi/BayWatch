@@ -1,4 +1,4 @@
-import { fail } from './reservation';
+import { fail } from './errors';
 
 export type Charger = {
   id: number;
@@ -73,6 +73,20 @@ export async function chargersNear(lat: number, lng: number, radiusKm: number): 
     return data.chargelocations.map(toCharger);
   } catch (e) {
     console.error('GoingElectric nearby search failed:', e);
+    return null;
+  }
+}
+
+// One charger by its GoingElectric id, to book a bay found on the map (ge-<id>). Cached for 6 hours; null when
+// GoingElectric doesn't know it or can't be reached.
+export async function chargerById(id: number): Promise<Charger | null> {
+  if (!process.env.GE_API_KEY || !Number.isInteger(id) || id <= 0) return null;
+  try {
+    const data = await query({ ge_id: String(id) }, { next: { revalidate: 6 * 3600 } });
+    const c = data.chargelocations.find((l) => l.ge_id === id);
+    return c ? toCharger(c) : null;
+  } catch (e) {
+    console.error('GoingElectric lookup failed:', e);
     return null;
   }
 }

@@ -1,5 +1,5 @@
 import { auth } from '@clerk/nextjs/server';
-import { ArrowRight, Navigation, Zap } from 'lucide-react';
+import { ArrowRight, Navigation, WifiOff, Zap } from 'lucide-react';
 import type { Metadata } from 'next';
 import { headers } from 'next/headers';
 import Link from 'next/link';
@@ -7,6 +7,7 @@ import { notFound } from 'next/navigation';
 import { BaySketch } from '@/components/landing/bay-sketch';
 import { buttonClass, chipClass } from '@/components/ui/button';
 import { Logo } from '@/components/ui/logo';
+import * as ecurious from '@/lib/ecurious';
 import { directionsUrl } from '@/lib/geo';
 import { bayId, partnerBay, reserveLink } from '@/lib/partners';
 import { formatEuro, FREE_CANCEL_MIN } from '@/lib/pricing';
@@ -37,13 +38,13 @@ export async function generateMetadata({ params }: PageProps<'/bay/[id]'>): Prom
   const title = `Reserve ${bay.name}`;
   const description = `${bay.powerKw} kW charging at ${bay.address}. Reserve before you set off: a guard keeps the bay free until your car arrives.`;
   const url = `/bay/${bayId}`;
-  const image = { url: '/icon-512.png', width: 512, height: 512, alt: 'Ecurious Reserve' };
+  const image = { url: '/icon-512.png', width: 512, height: 512, alt: 'Baywatch' };
   return {
     metadataBase: await origin(),
     title,
     description,
     alternates: { canonical: url },
-    openGraph: { type: 'website', siteName: 'Ecurious Reserve', url, title, description, images: [image] },
+    openGraph: { type: 'website', siteName: 'Baywatch', url, title, description, images: [image] },
     twitter: { card: 'summary', title, description, images: [image.url] },
   };
 }
@@ -51,8 +52,10 @@ export async function generateMetadata({ params }: PageProps<'/bay/[id]'>): Prom
 export default async function BayPage({ params }: PageProps<'/bay/[id]'>) {
   if (!(await isOurBay(params))) notFound();
   const { status, feeCents, demand } = partnerBay(reservations).availability();
-  const a = AVAILABILITY[status];
-  const free = status === 'free';
+  // the guard can't rise while the device is offline: say so instead of offering a reservation (`online` is unset on the mock)
+  const offline = (await ecurious.status()).online === false;
+  const a = offline ? { label: 'Offline', tone: 'bg-warn-tint text-warn', scene: AVAILABILITY[status].scene } : AVAILABILITY[status];
+  const free = status === 'free' && !offline;
   // signed-out visitors sign in first, then land straight on the bay
   const target = free ? reserveLink() : `/explore?bay=${encodeURIComponent(bayId)}`;
   const { userId } = await auth();
@@ -61,31 +64,39 @@ export default async function BayPage({ params }: PageProps<'/bay/[id]'>) {
   return (
     <div className="min-h-dvh bg-page">
       <header className="mx-auto max-w-4xl px-5 py-5 sm:px-8">
-        <Link href="/" aria-label="Ecurious Reserve home" className="inline-flex rounded-lg">
+        <Link href="/" aria-label="Baywatch home" className="inline-flex rounded-lg">
           <Logo />
         </Link>
       </header>
 
       <main id="main" className="mx-auto max-w-4xl px-5 pb-16 sm:px-8">
-        <article className="grid items-center gap-8 rounded-4xl bg-surface p-6 ring-1 ring-line sm:grid-cols-[1fr_13rem] sm:p-10">
+        <article className="grid items-center gap-8 rounded-3xl bg-surface p-6 ring-1 ring-line sm:grid-cols-[1fr_13rem] sm:p-10">
           <div>
             <span className={`${chipClass} ${a.tone}`}>{a.label}</span>
-            <h1 className="mt-3 font-display text-[clamp(2.2rem,6vw,3.2rem)] font-bold leading-none tracking-[-0.02em]">{bay.name}</h1>
+            <h1 className="mt-4 font-display text-[clamp(2.5rem,6vw,3.5rem)] leading-[0.9] tracking-[0.012em]">{bay.name}</h1>
             <p className="mt-2 text-lg text-muted">{bay.address}</p>
             <p className="mt-5 flex items-center gap-2 font-semibold">
-              <Zap aria-hidden className="size-5 shrink-0 text-brand" /> {bay.powerKw} kW · one bay, kept free by a guard
+              <Zap aria-hidden className="size-5 shrink-0 text-ink" /> {bay.powerKw} kW · one bay, kept free by a guard
             </p>
-            <p className="mt-2 max-w-[48ch] text-muted">
-              {free
-                ? `Reserve for ${formatEuro(feeCents)} (${demand.toLowerCase()} demand right now). Arrive within ${holdMinutes} min; cancelling is free in the first ${FREE_CANCEL_MIN} min.`
-                : 'Another driver has this bay right now. Open it in the app to be told when it’s free.'}
-            </p>
+            {offline ? (
+              <p role="status" className="mt-3 flex max-w-[48ch] gap-3 rounded-2xl bg-warn-tint p-4 font-semibold text-ink">
+                <WifiOff aria-hidden className="mt-0.5 size-5 shrink-0 text-warn" />
+                The bay is offline right now. Try again in a few minutes.
+              </p>
+            ) : (
+              <p className="mt-2 max-w-[48ch] text-muted">
+                {free
+                  ? `Reserve for ${formatEuro(feeCents)} (${demand.toLowerCase()} demand right now). Arrive within ${holdMinutes} min; cancelling is free in the first ${FREE_CANCEL_MIN} min.`
+                  : 'Another driver has this bay right now. Open it in the app to be told when it’s free.'}
+              </p>
+            )}
             <div className="mt-7 flex flex-col gap-3 sm:flex-row">
               <Link href={href} className={buttonClass('primary', 'lg')}>
-                {free ? 'Reserve in Ecurious Reserve' : 'Open in Ecurious Reserve'} <ArrowRight aria-hidden className="size-5" />
+                {free ? 'Book this charger' : 'Open in the app'}{' '}
+                <ArrowRight aria-hidden className="size-5 transition-transform duration-200 group-hover:translate-x-1" />
               </Link>
               <a href={directionsUrl(bay)} target="_blank" rel="noopener noreferrer" className={buttonClass('secondary', 'lg')}>
-                <Navigation aria-hidden className="size-5" /> Directions
+                <Navigation aria-hidden className="size-5" /> Navigate by car
               </a>
             </div>
             {!userId && <p className="mt-3 text-sm text-muted">You’ll sign in first, then come straight back to this bay.</p>}
@@ -95,8 +106,8 @@ export default async function BayPage({ params }: PageProps<'/bay/[id]'>) {
 
         <p className="mt-6 text-sm text-muted">
           Building a charging app? Your drivers can reserve this bay through the{' '}
-          <a href="/openapi.json" className="font-semibold text-brand underline underline-offset-2 hover:text-brand-strong">
-            Ecurious partner API
+          <a href="/openapi.json" className="font-semibold text-accent underline underline-offset-2 hover:text-ink">
+            Baywatch partner API
           </a>
           .
         </p>

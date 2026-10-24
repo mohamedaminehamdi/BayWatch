@@ -7,7 +7,7 @@ import { LiveBayStatus } from '@/components/landing/live-bay-status';
 import { NearbyChargers } from '@/components/landing/nearby-chargers';
 import { PhoneMockup } from '@/components/landing/phone-mockup';
 import { buttonClass } from '@/components/ui/button';
-import { Logo, PoweredByEcurious } from '@/components/ui/logo';
+import { Logo } from '@/components/ui/logo';
 import { BLOCKED_DC_HOUR_MARGIN, CPO_SHARE, EXTENSION_MIN, feeRules, formatEuro, FREE_CANCEL_MIN, PRICES, RESERVATION_FROM_CENTS } from '@/lib/pricing';
 import { holdMinutes } from '@/lib/server';
 
@@ -19,7 +19,7 @@ const arrow = <ArrowRight className="size-5 transition-transform duration-200 gr
 const bullet = <span aria-hidden className="mt-2 size-2 shrink-0 bg-signal" />;
 
 const steps = [
-  { scene: 'find', title: 'Find', text: 'Search public chargers on the map. Bays with an Ecurious guard can be reserved.' },
+  { scene: 'find', title: 'Find', text: 'Search chargers on the map and pick one. Every charger can be booked through Baywatch.' },
   {
     scene: 'guarded',
     title: 'Reserve',
@@ -68,7 +68,7 @@ export default function Landing() {
     <>
       <div className="bg-page text-ink">
         <header className={`${wrap} flex items-center justify-between gap-4 py-5`}>
-          <Link href="/" aria-label="Ecurious Reserve home" className="rounded-lg">
+          <Link href="/" aria-label="Baywatch home" className="rounded-lg">
             <Logo />
           </Link>
           <nav aria-label="Main" className="hidden items-center gap-7 text-[0.95rem] font-medium md:flex">
@@ -255,7 +255,7 @@ export default function Landing() {
               </p>
               {/* no self-serve operator sign-up yet: a plain line of text, deliberately not styled like a button */}
               <p className="mt-8 flex items-center gap-2.5 text-lg font-semibold">
-                <MessagesSquare className="size-5 shrink-0 text-signal" /> Talk to us at the Ecurious stand.
+                <MessagesSquare className="size-5 shrink-0 text-signal" /> Talk to us at our stand.
               </p>
             </article>
           </div>
@@ -300,7 +300,7 @@ export default function Landing() {
         <div className={`${wrap} flex flex-col gap-6 py-12 text-sm md:flex-row md:items-end md:justify-between`}>
           <div className="flex flex-col gap-3">
             <Logo tone="light" />
-            <p>A prototype for the Ecurious smart reservation challenge.</p>
+            <p>A hackathon prototype for reserving public chargers.</p>
           </div>
           <div className="flex flex-col gap-3 md:items-end">
             <p className="max-w-[60ch] font-mono text-xs uppercase leading-relaxed tracking-[0.06em] md:text-right">
@@ -318,7 +318,6 @@ export default function Landing() {
               </a>
               .
             </p>
-            <PoweredByEcurious />
           </div>
         </div>
       </footer>

@@ -48,7 +48,7 @@ export function PhoneMockup({ holdMinutes }: { holdMinutes: number }) {
               <Timer className="size-3.5" /> Left to arrive · guard up
             </p>
             <div className="mt-4 border-t border-white/14 pt-3.5">
-              <p className="font-semibold leading-tight">Ecurious test bay</p>
+              <p className="font-semibold leading-tight">Baywatch Bay 1</p>
               <div className="mt-1.5 flex items-center justify-between gap-2">
                 <p className="font-mono text-[0.6875rem] uppercase tracking-[0.06em] text-on-brand-muted">CCS · 200 kW · 1.2 km</p>
                 <PlateBadge plate="M AB 1234" size="sm" />

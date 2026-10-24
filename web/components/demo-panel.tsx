@@ -75,15 +75,18 @@ export function DemoPanel() {
 
   return (
     <>
+      {/* demo-only UI is violet, so it never reads as part of the driver's product */}
       <button
         type="button"
         onClick={() => setOpen(true)}
-        className="inline-flex min-h-9 items-center gap-1.5 rounded-full bg-signal px-3 text-sm font-semibold text-ink hover:bg-signal-strong"
+        className="inline-flex min-h-11 items-center gap-1.5 rounded-full bg-accent-tint px-3.5 font-mono text-xs font-semibold uppercase tracking-[0.1em] text-accent ring-1 ring-inset ring-accent/25 hover:ring-accent"
       >
         <FlaskConical className="size-4" /> Demo
       </button>
       <Dialog open={open} onClose={() => setOpen(false)} title="Demo: bay camera">
-        <p className="text-muted">Sends what the camera at the bay would see. Only on with SIMULATOR=1, never next to real hardware.</p>
+        <p className="text-muted">
+          Sends what the camera at the bay would see. Only on with <code className="font-mono text-ink">SIMULATOR=1</code>, never next to real hardware.
+        </p>
         <fieldset className="mt-4">
           <legend className="font-semibold">Site demand</legend>
           <p className="text-sm text-muted">
@@ -96,7 +99,7 @@ export function DemoPanel() {
                 type="button"
                 aria-pressed={state.quote.demand === d.tier}
                 onClick={() => setDemand(d.level)}
-                className="min-h-10 rounded-lg text-sm font-semibold text-muted transition-colors aria-pressed:bg-surface aria-pressed:text-ink aria-pressed:shadow-sm"
+                className="min-h-11 rounded-lg font-mono text-xs font-semibold uppercase tracking-[0.06em] text-muted transition-colors aria-pressed:bg-surface aria-pressed:text-ink aria-pressed:shadow-sm"
               >
                 {d.label}
               </button>
@@ -106,7 +109,7 @@ export function DemoPanel() {
         {cars.length > 1 && (
           <label className="mt-4 grid gap-1.5">
             <span className="font-semibold">My car</span>
-            <select value={carId} onChange={(e) => setCarId(e.target.value)} className="min-h-11 rounded-xl border border-line-strong/70 bg-surface px-3">
+            <select value={carId} onChange={(e) => setCarId(e.target.value)} className="min-h-11 rounded-full border border-line-strong bg-surface px-4">
               {cars.map((c) => (
                 <option key={c.id} value={c.id}>
                   {c.display} · {c.label}
@@ -122,16 +125,17 @@ export function DemoPanel() {
               type="button"
               disabled={e.needsCar && !car}
               onClick={e.run}
-              className="flex min-h-14 flex-col items-start justify-center rounded-xl px-4 py-2 text-left ring-1 ring-line hover:bg-sunken disabled:opacity-50"
+              className="flex min-h-14 flex-col items-start justify-center rounded-lg px-4 py-2 text-left ring-1 ring-line-strong hover:bg-brand-tint hover:ring-ink disabled:opacity-50"
             >
               <span className="font-semibold">{e.label}</span>
-              {e.hint && <span className="font-display text-sm tracking-wide text-muted">{e.hint}</span>}
+              {/* mono, so a misread A8 is visibly not AB (Bebas draws 0 and O alike) */}
+              {e.hint && <span className="font-mono text-sm text-muted">{e.hint}</span>}
             </button>
           ))}
         </div>
         {!cars.length && <p className="mt-3 text-sm text-muted">Add a car to send its plate.</p>}
         {last && (
-          <p role="status" className="mt-4 rounded-xl bg-brand-tint px-4 py-2.5 font-medium text-brand-strong">
+          <p role="status" className="mt-4 rounded-xl bg-accent-tint px-4 py-2.5 font-mono text-sm text-ink">
             {last}
           </p>
         )}
@@ -139,9 +143,9 @@ export function DemoPanel() {
         <ol className="mt-2 grid max-h-56 gap-1.5 overflow-y-auto text-sm">
           {state.log.map((l, i) => (
             <li key={`${l.at}-${i}`} className="flex gap-3">
-              <span className="shrink-0 tabular-nums text-muted">{formatTime(l.at)}</span>
+              <span className="shrink-0 font-mono text-muted">{formatTime(l.at)}</span>
               <span>
-                <span className="font-semibold">{l.type.replace(/_/g, ' ')}</span>
+                <span className="font-mono text-xs font-semibold uppercase tracking-[0.08em]">{l.type.replace(/_/g, ' ')}</span>
                 {l.detail && <span className="text-muted"> · {l.detail}</span>}
               </span>
             </li>

@@ -1,19 +1,22 @@
 'use client';
 
-import { Check, CreditCard, TriangleAlert } from 'lucide-react';
+import { Check, CreditCard, TriangleAlert, WifiOff } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import { useEffect, useState } from 'react';
 import { api } from '@/components/api';
 import { useAppState } from '@/components/app/app-state';
 import { formatTime, useNow } from '@/components/time';
-import { Button } from '@/components/ui/button';
+import { Button, chipClass } from '@/components/ui/button';
 import { Dialog } from '@/components/ui/dialog';
 import { PlateBadge } from '@/components/ui/plate-badge';
 import { VehicleForm } from '@/components/vehicles/vehicle-form';
+import { bayOffline, OFFLINE_TEXT } from './panels';
 import { bookingTerms, formatEuro, MAX_RESERVATION_CENTS } from '@/lib/pricing';
 import type { Vehicle } from '@/lib/vehicles';
 
 const MIN = 60_000;
+// the radios are visually hidden, so their labels carry the keyboard focus ring
+const focusRing = 'has-focus-visible:outline-3 has-focus-visible:outline-offset-2 has-focus-visible:outline-accent';
 export const formatLength = (minutes: number) =>
   minutes < 60 ? `${minutes} min` : `${Math.floor(minutes / 60)} h${minutes % 60 ? ` ${minutes % 60}` : ''}`;
 
@@ -43,6 +46,7 @@ export function ReserveDialog({ open, onClose }: { open: boolean; onClose: () =>
   const { quote: q, session } = state;
   const length = minutes ?? (session.presets.includes(60) ? 60 : session.presets[0]);
   const terms = bookingTerms({ type: q.type, feeCents: q.cents, prepaid: q.prepaid, graceMinutes: state.holdMinutes });
+  const offline = bayOffline(state);
 
   async function pay() {
     setBusy(true);
@@ -59,7 +63,7 @@ export function ReserveDialog({ open, onClose }: { open: boolean; onClose: () =>
   }
 
   return (
-    <Dialog open={open} onClose={onClose} title={`Reserve ${state.bay.name}`}>
+    <Dialog open={open} onClose={onClose} title={`Book ${state.bay.name}`}>
       {cars === null && !error && <div className="h-40 animate-pulse rounded-2xl bg-sunken" />}
 
       {cars?.length === 0 && (
@@ -83,12 +87,12 @@ export function ReserveDialog({ open, onClose }: { open: boolean; onClose: () =>
               {cars.map((c) => (
                 <label
                   key={c.id}
-                  className="flex cursor-pointer items-center gap-4 rounded-2xl p-4 ring-1 ring-line transition-shadow has-checked:bg-brand-tint has-checked:ring-2 has-checked:ring-brand"
+                  className={`flex cursor-pointer items-center gap-4 rounded-2xl p-4 ring-1 ring-line-strong transition-shadow has-checked:bg-brand-tint has-checked:ring-2 has-checked:ring-brand ${focusRing}`}
                 >
                   <input type="radio" name="car" value={c.id} checked={carId === c.id} onChange={() => setCarId(c.id)} className="sr-only" />
                   <PlateBadge plate={c.display} size="sm" />
                   <span className="flex-1 font-medium">{c.label}</span>
-                  {carId === c.id && <Check className="size-5 text-brand" />}
+                  {carId === c.id && <Check className="size-5 text-ink" />}
                 </label>
               ))}
             </div>
@@ -103,7 +107,7 @@ export function ReserveDialog({ open, onClose }: { open: boolean; onClose: () =>
               {session.presets.map((m) => (
                 <label
                   key={m}
-                  className="cursor-pointer rounded-full px-4 py-2 font-semibold ring-1 ring-line transition-colors has-checked:bg-ink has-checked:text-white has-checked:ring-ink"
+                  className={`inline-flex min-h-11 cursor-pointer items-center rounded-full px-4 font-mono text-sm font-semibold uppercase tracking-[0.06em] ring-1 ring-line-strong transition-colors has-checked:bg-ink has-checked:text-on-brand has-checked:ring-ink ${focusRing}`}
                 >
                   <input type="radio" name="length" value={m} checked={length === m} onChange={() => setMinutes(m)} className="sr-only" />
                   {formatLength(m)}
@@ -116,8 +120,8 @@ export function ReserveDialog({ open, onClose }: { open: boolean; onClose: () =>
           <div>
             <h3 className="font-semibold">Price</h3>
             <p className="mt-2 flex flex-wrap items-baseline gap-x-3 gap-y-1">
-              <span className="text-4xl font-semibold">{formatEuro(q.cents)}</span>
-              <span className={`rounded-full px-2.5 py-0.5 text-sm font-semibold ${q.multiplier > 1 ? 'bg-warn-tint text-warn' : 'bg-brand-tint text-brand-strong'}`}>
+              <span className="font-display text-5xl leading-none tracking-[0.012em]">{formatEuro(q.cents)}</span>
+              <span className={`${chipClass} ${q.multiplier > 1 ? 'bg-warn-tint text-warn' : 'bg-brand-tint text-brand-strong'}`}>
                 {q.demand} demand{q.multiplier !== 1 ? ` · ${q.multiplier}×` : ''}
               </span>
               <span className="text-sm text-muted">never more than {formatEuro(MAX_RESERVATION_CENTS)}</span>
@@ -126,11 +130,11 @@ export function ReserveDialog({ open, onClose }: { open: boolean; onClose: () =>
           </div>
 
           {q.warning && (
-            <div role="alert" className="flex gap-3 rounded-2xl bg-warn-tint p-4 text-warn">
-              <TriangleAlert className="mt-0.5 size-5 shrink-0" />
+            <div role="alert" className="flex gap-3 rounded-2xl bg-warn-tint p-4 text-ink">
+              <TriangleAlert className="mt-0.5 size-5 shrink-0 text-warn" />
               <div>
                 {q.prepaid && <p className="font-semibold">You pay the fee up front</p>}
-                <p className="text-ink">{q.warning}</p>
+                <p>{q.warning}</p>
               </div>
             </div>
           )}
@@ -138,7 +142,7 @@ export function ReserveDialog({ open, onClose }: { open: boolean; onClose: () =>
           <ul className="grid gap-2.5 rounded-2xl bg-sunken p-4 text-[0.95rem]">
             {[terms.arrive, terms.noShow, terms.cancel, terms.extend, terms.overstay].map((t) => (
               <li key={t} className="flex gap-2.5">
-                <Check className="mt-0.5 size-4 shrink-0 text-brand" />
+                <Check className="mt-0.5 size-4 shrink-0 text-ink" />
                 {t}
               </li>
             ))}
@@ -150,10 +154,16 @@ export function ReserveDialog({ open, onClose }: { open: boolean; onClose: () =>
           </label>
 
           <div>
-            <Button size="lg" className="w-full" loading={busy} disabled={!carId || !accepted} onClick={pay}>
-              <CreditCard className="size-5" /> Pay {formatEuro(q.cents)} and reserve
+            {offline && (
+              <p role="status" className="mb-3 flex gap-3 rounded-2xl bg-warn-tint p-4 font-semibold text-ink">
+                <WifiOff className="mt-0.5 size-5 shrink-0 text-warn" />
+                {OFFLINE_TEXT}
+              </p>
+            )}
+            <Button size="lg" className="w-full" loading={busy} disabled={!carId || !accepted || offline} onClick={pay}>
+              <CreditCard className="size-5" /> Pay {formatEuro(q.cents)} and book
             </Button>
-            <p className="mt-2 text-center text-sm text-muted">Demo payment: no card is charged.</p>
+            <p className="mt-2 text-center font-mono text-xs uppercase tracking-[0.08em] text-muted">Demo payment: no card is charged.</p>
           </div>
         </div>
       )}

@@ -10,7 +10,7 @@ import { useAppState } from '@/components/app/app-state';
 import { distanceM, type Point } from '@/lib/geo';
 import type { Charger } from '@/lib/goingelectric';
 import type { BayLook, View } from './map-view';
-import { BayDetail, bayAvailability, ChargerDetail, ChargerList, type Row } from './panels';
+import { BayDetail, bayAvailability, bayOffline, ChargerDetail, ChargerList, type Row } from './panels';
 import { ReserveDialog } from './reserve-dialog';
 
 const MapView = dynamic(() => import('./map-view'), { ssr: false, loading: () => <div className="absolute inset-0 animate-pulse bg-sunken" /> });
@@ -37,7 +37,7 @@ export function Explore() {
   const [me, setMe] = useState<Point | null>(null);
   const [selected, setSelected] = useState<Selection>(params.has('bay') ? { kind: 'bay' } : null);
   const [sheetOpen, setSheetOpen] = useState(params.has('bay'));
-  const [reserveOpen, setReserveOpen] = useState(false);
+  const [reserveOpen, setReserveOpen] = useState(params.get('reserve') === '1'); // partner deep links: /explore?bay=…&reserve=1
   const [query, setQuery] = useState('');
   const [searchNote, setSearchNote] = useState('');
 
@@ -77,7 +77,8 @@ export function Explore() {
   const bay = state.bay;
   const bayDistance = from ? distanceM(from, bay) : null;
   const availability = bayAvailability(state);
-  const bayLook: BayLook = availability === 'free' ? 'free' : availability === 'mine' ? 'mine' : 'busy';
+  // a booked driver keeps their pin; otherwise an offline device greys it out, whatever the bay's own state
+  const bayLook: BayLook = availability === 'mine' ? 'mine' : bayOffline(state) ? 'offline' : availability === 'free' ? 'free' : 'busy';
   const charger = selected?.kind === 'charger' ? visible.find((c) => c.id === selected.id) : undefined;
 
   const zoomNote = view && view.zoom < MIN_ZOOM ? 'Zoom in to see public chargers.' : '';
@@ -130,7 +131,7 @@ export function Explore() {
       type="button"
       aria-pressed={on}
       onClick={toggle}
-      className="min-h-9 shrink-0 rounded-full bg-surface px-3.5 text-sm font-semibold text-ink shadow-[0_2px_8px_-2px_rgb(0_0_0/0.18)] ring-1 ring-line transition-colors aria-pressed:bg-ink aria-pressed:text-white aria-pressed:ring-ink"
+      className="min-h-11 shrink-0 rounded-full bg-surface px-4 font-mono text-xs font-semibold uppercase tracking-[0.08em] text-ink shadow-[0_2px_8px_-2px_rgb(15_20_25/0.18)] ring-1 ring-line-strong transition-colors aria-pressed:bg-ink aria-pressed:text-on-brand aria-pressed:ring-ink"
     >
       {label}
     </button>
@@ -147,14 +148,14 @@ export function Explore() {
             onChange={(e) => setQuery(e.target.value)}
             placeholder="Search a city or address"
             enterKeyHint="search"
-            className="min-h-12 w-full rounded-xl bg-surface pl-11 pr-3 text-base shadow-[0_2px_10px_-2px_rgb(0_0_0/0.2)] ring-1 ring-line placeholder:text-faint focus:outline-none focus:ring-2 focus:ring-brand"
+            className="min-h-12 w-full rounded-full bg-surface pl-11 pr-4 text-base shadow-[0_2px_10px_-2px_rgb(15_20_25/0.2)] ring-1 ring-line-strong placeholder:text-faint focus:outline-none focus:ring-2 focus:ring-accent"
           />
         </label>
         <button
           type="button"
           onClick={locate}
           aria-label="Locate me"
-          className="grid size-12 shrink-0 place-items-center rounded-xl bg-surface text-ink shadow-[0_2px_10px_-2px_rgb(0_0_0/0.2)] ring-1 ring-line hover:bg-sunken"
+          className="grid size-12 shrink-0 place-items-center rounded-full bg-surface text-ink shadow-[0_2px_10px_-2px_rgb(15_20_25/0.2)] ring-1 ring-line-strong hover:bg-sunken"
         >
           <LocateFixed className="size-5" />
         </button>
@@ -164,7 +165,7 @@ export function Explore() {
         {chip(reservableOnly, 'Reservable only', () => setReservableOnly((v) => !v))}
       </div>
       {searchNote && (
-        <p role="status" className="rounded-xl bg-surface px-3.5 py-2 text-sm text-muted shadow-sm ring-1 ring-line">
+        <p role="status" className="rounded-2xl bg-surface px-4 py-2 text-sm text-muted shadow-sm ring-1 ring-line">
           {searchNote}
         </p>
       )}
@@ -176,7 +177,17 @@ export function Explore() {
       // details only show distance from you: the map re-centres on what you picked, so a centre distance means nothing
       <BayDetail state={state} distance={me ? distanceM(me, bay) : null} onBack={() => setSelected(null)} onReserve={() => setReserveOpen(true)} />
     ) : charger ? (
-      <ChargerDetail charger={charger} distance={me ? distanceM(me, charger) : null} onBack={() => setSelected(null)} />
+      <ChargerDetail
+        charger={charger}
+        distance={me ? distanceM(me, charger) : null}
+        onBack={() => setSelected(null)}
+        onBook={() => {
+          setSelected({ kind: 'bay' });
+          setSheetOpen(true);
+          fly(bay, 15);
+          setReserveOpen(true);
+        }}
+      />
     ) : (
       <ChargerList
         state={state}
@@ -218,7 +229,7 @@ export function Explore() {
         <section
           aria-label="Chargers"
           data-open={sheetOpen}
-          className="absolute inset-x-0 bottom-0 z-(--z-sheet) flex h-[78%] translate-y-[calc(100%-11.5rem)] flex-col rounded-t-3xl bg-page shadow-[0_-12px_40px_-12px_rgb(0_0_0/0.3)] transition-transform duration-300 ease-out data-[open=true]:translate-y-0 lg:hidden"
+          className="absolute inset-x-0 bottom-0 z-(--z-sheet) flex h-[78%] translate-y-[calc(100%-11.5rem)] flex-col rounded-t-3xl bg-page shadow-[0_-12px_40px_-12px_rgb(15_20_25/0.3)] transition-transform duration-300 ease-out data-[open=true]:translate-y-0 lg:hidden"
         >
           <button
             type="button"
@@ -227,7 +238,7 @@ export function Explore() {
             className="flex w-full flex-col items-center gap-1.5 pb-2 pt-2.5"
           >
             <span className="h-1.5 w-10 rounded-full bg-line-strong/60" />
-            <span className="flex items-center gap-1 text-sm font-semibold text-muted">
+            <span className="flex items-center gap-1 font-mono text-xs font-semibold uppercase tracking-[0.1em] text-muted">
               {sheetOpen ? 'Show map' : `${rows.length ? `${rows.length}${visible.length > LIST_CAP ? '+' : ''} chargers nearby` : 'Chargers'}`}
               <ChevronUp className={`size-4 transition-transform ${sheetOpen ? 'rotate-180' : ''}`} />
             </span>

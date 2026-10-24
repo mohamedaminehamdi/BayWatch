@@ -163,6 +163,15 @@
                       "timestamp": "2026-10-24T11:04:39.636Z"
                     }
                   },
+                  "hardwareRefused": {
+                    "summary": "The bay's hardware said no, with its reason",
+                    "value": {
+                      "data": { "result": "REJECTED", "timeout": 0, "message": [{ "language": "en", "text": "The bay could not be reserved: A car is over the arm, so it was not raised" }] },
+                      "status_code": 1000,
+                      "status_message": "Success",
+                      "timestamp": "2026-10-24T11:04:39.700Z"
+                    }
+                  },
                   "alreadyReserved": {
                     "summary": "Another booking holds the bay",
                     "value": {
@@ -257,6 +266,15 @@
                       "status_message": "Success",
                       "timestamp": "2026-10-24T11:06:02.311Z"
                     }
+                  },
+                  "hardwareRefused": {
+                    "summary": "The arm could not be lowered: the booking stays, try again",
+                    "value": {
+                      "data": { "result": "REJECTED", "timeout": 0, "message": [{ "language": "en", "text": "Could not release the bay: The last bay command failed, try again in 20 s" }] },
+                      "status_code": 1000,
+                      "status_message": "Success",
+                      "timestamp": "2026-10-24T11:06:03.120Z"
+                    }
                   }
                 }
               }
@@ -266,7 +284,8 @@
           "401": { "$ref": "#/components/responses/Unauthorized" },
           "413": { "$ref": "#/components/responses/TooLarge" },
           "429": { "$ref": "#/components/responses/TooManyRequests" },
-          "500": { "$ref": "#/components/responses/ServerError" }
+          "500": { "$ref": "#/components/responses/ServerError" },
+          "502": { "$ref": "#/components/responses/HardwareDown" }
         }
       }
     },
@@ -726,7 +745,7 @@
         }
       },
       "HardwareDown": {
-        "description": "The bay's hardware did not answer. Nothing was booked; try again in a minute.",
+        "description": "The bay's hardware did not answer: a timeout or a dropped connection. Nothing was booked or cancelled; try again in a minute. When the hardware answers with a reason (a car over the arm, the bay offline), you get a 200 REJECTED with that reason instead.",
         "content": {
           "application/json": {
             "schema": { "$ref": "#/components/schemas/CommandEnvelope" },

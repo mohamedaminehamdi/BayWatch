@@ -1,12 +1,12 @@
 'use client';
 
-import { ArrowLeft, BellRing, Clock, ExternalLink, Navigation, ShieldCheck, TriangleAlert, Zap } from 'lucide-react';
+import { ArrowLeft, BellRing, Clock, ExternalLink, Navigation, ShieldCheck, TriangleAlert, WifiOff, Zap } from 'lucide-react';
 import Link from 'next/link';
 import { useState } from 'react';
 import { api } from '@/components/api';
 import { useAppState } from '@/components/app/app-state';
 import { formatCountdown, formatTime, useNow } from '@/components/time';
-import { Button, buttonClass } from '@/components/ui/button';
+import { Button, buttonClass, chipClass } from '@/components/ui/button';
 import { directionsUrl, formatDistance } from '@/lib/geo';
 import type { Charger } from '@/lib/goingelectric';
 import { formatEuro, FREE_CANCEL_MIN } from '@/lib/pricing';
@@ -27,6 +27,10 @@ export function bayAvailability(s: AppState) {
   if (s.priority && !s.priority.mine) return 'held' as const;
   return 'free' as const;
 }
+
+// The guard can't be raised while the device is offline, so nobody can reserve. `online` is unset on the mock.
+export const bayOffline = (s: AppState) => s.hardware.online === false;
+export const OFFLINE_TEXT = 'The bay is offline right now. Try again in a few minutes.';
 
 const AVAILABILITY = {
   mine: { label: 'Booked by you', tone: 'bg-brand-tint text-brand-strong' },
@@ -56,27 +60,28 @@ export function ChargerList({
   onSelectBay: () => void;
   onSelect: (id: number) => void;
 }) {
+  const offline = bayOffline(state);
   const a = AVAILABILITY[bayAvailability(state)];
   return (
     <div>
-      <button type="button" onClick={onSelectBay} className="group flex w-full items-center gap-4 rounded-2xl bg-brand-deep p-4 text-left text-white">
-        <span className="grid size-11 shrink-0 place-items-center rounded-xl bg-signal text-ink">
+      <button type="button" onClick={onSelectBay} className="group flex w-full items-center gap-4 rounded-2xl bg-brand-deep p-4 text-left text-on-brand">
+        <span className="grid size-11 shrink-0 place-items-center rounded-full bg-signal text-ink">
           <Zap className="size-5 fill-current" />
         </span>
         <span className="min-w-0 flex-1">
-          <span className="block truncate font-semibold">{state.bay.name}</span>
-          <span className="block text-sm text-on-brand">
-            {state.bay.powerKw} kW · {a.label}
-            {bayAvailability(state) === 'free' && ` · ${formatEuro(state.quote.cents)}`}
+          <span className="block truncate font-display text-2xl leading-none tracking-[0.012em]">{state.bay.name}</span>
+          <span className="mt-1.5 block font-mono text-xs uppercase tracking-[0.08em] text-on-brand-muted">
+            {state.bay.powerKw} kW · {offline ? 'Offline' : a.label}
+            {!offline && bayAvailability(state) === 'free' && ` · ${formatEuro(state.quote.cents)}`}
             {bayDistance !== null && ` · ${formatDistance(bayDistance)}`}
           </span>
         </span>
-        <span className="text-sm font-semibold text-signal group-hover:underline">View</span>
+        <span className="font-mono text-xs font-semibold uppercase tracking-[0.1em] text-signal">View →</span>
       </button>
 
-      <h2 className="mt-6 flex items-baseline justify-between gap-3 text-sm font-semibold text-muted">
-        <span>Public chargers nearby</span>
-        <span className="text-right font-normal">{fromYou ? 'Nearest to you' : 'Nearest to the map centre'}</span>
+      <h2 className="mt-6 flex items-baseline justify-between gap-3 text-sm text-muted">
+        <span className="font-mono text-xs font-medium uppercase tracking-[0.12em]">Public chargers nearby</span>
+        <span className="text-right">{fromYou ? 'Nearest to you' : 'Nearest to the map centre'}</span>
       </h2>
       {note && <p className="mt-3 rounded-xl bg-sunken px-4 py-3 text-sm text-muted">{note}</p>}
       <ul className="mt-2 divide-y divide-line">
@@ -91,13 +96,13 @@ export function ChargerList({
                 />
                 <span className="min-w-0 flex-1">
                   <span className="block truncate font-medium">{c.name}</span>
-                  <span className="block truncate text-sm text-muted">
+                  <span className="block truncate font-mono text-[0.8125rem] text-muted">
                     {kw ? `${kw} kW` : 'Power unknown'}
                     {kw >= 50 ? ' · DC' : ' · AC'}
                     {c.fault && ' · fault reported'}
                   </span>
                 </span>
-                {distance !== null && <span className="shrink-0 text-sm tabular-nums text-muted">{formatDistance(distance)}</span>}
+                {distance !== null && <span className="shrink-0 font-mono text-[0.8125rem] text-muted">{formatDistance(distance)}</span>}
               </button>
             </li>
           );
@@ -110,19 +115,29 @@ export function ChargerList({
 
 function BackButton({ onBack }: { onBack: () => void }) {
   return (
-    <button type="button" onClick={onBack} className="-ml-2 mb-3 flex min-h-10 w-fit items-center gap-1.5 rounded-lg px-2 font-semibold text-muted hover:bg-sunken hover:text-ink">
+    <button type="button" onClick={onBack} className="-ml-2 mb-3 flex min-h-11 w-fit items-center gap-1.5 rounded-full px-3 font-semibold text-muted hover:bg-sunken hover:text-ink">
       <ArrowLeft className="size-4" /> All chargers
     </button>
   );
 }
 
-export function ChargerDetail({ charger: c, distance, onBack }: { charger: Charger; distance: number | null; onBack: () => void }) {
+export function ChargerDetail({
+  charger: c,
+  distance,
+  onBack,
+  onBook,
+}: {
+  charger: Charger;
+  distance: number | null;
+  onBack: () => void;
+  onBook: () => void;
+}) {
   const kw = maxPower(c);
   return (
     <div>
       <BackButton onBack={onBack} />
-      <p className="text-sm font-semibold text-muted">{c.network || 'Public charger'}</p>
-      <h2 className="mt-1 font-display text-2xl leading-tight">{c.name}</h2>
+      <p className="font-mono text-xs font-medium uppercase tracking-[0.12em] text-muted">{c.network || 'Public charger'}</p>
+      <h2 className="mt-2 font-display text-3xl leading-[0.95] tracking-[0.012em]">{c.name}</h2>
       <p className="mt-1 text-muted">
         {c.address}
         {distance !== null && ` · ${formatDistance(distance)} away`}
@@ -134,22 +149,25 @@ export function ChargerDetail({ charger: c, distance, onBack }: { charger: Charg
       )}
       <ul className="mt-5 grid gap-2">
         {c.points.map((p, i) => (
-          <li key={i} className="flex items-center justify-between rounded-xl bg-sunken px-4 py-3">
+          <li key={i} className="flex items-center justify-between rounded-lg bg-sunken px-4 py-3">
             <span className="font-medium">
               {p.count}× {p.type}
             </span>
-            <span className="tabular-nums text-muted">{p.power} kW</span>
+            <span className="font-mono text-muted">{p.power} kW</span>
           </li>
         ))}
       </ul>
       <p className="mt-5 text-sm text-muted">
-        This charger has no Ecurious guard, so it can’t be reserved: it may be taken when you arrive.
+        This charger has no Baywatch guard, so it can’t be reserved: it may be taken when you arrive.
         {kw >= 50 ? '' : ' It charges with AC, which is slower.'}
       </p>
       <div className="mt-5 flex flex-wrap gap-3">
         <a href={directionsUrl(c)} target="_blank" rel="noopener" className={buttonClass('primary', 'lg')}>
-          <Navigation className="size-5" /> Navigate
+          <Navigation className="size-5" /> Navigate by car
         </a>
+        <Button variant="secondary" size="lg" onClick={onBook}>
+          <Zap className="size-5" /> Book now
+        </Button>
         {c.url && (
           <a href={c.url} target="_blank" rel="noopener" className={buttonClass('secondary', 'lg')}>
             GoingElectric <ExternalLink className="size-4" />
@@ -166,6 +184,7 @@ export function BayDetail({ state, distance, onBack, onReserve }: { state: AppSt
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const availability = bayAvailability(state);
+  const offline = bayOffline(state);
   const r = state.reservation;
 
   async function waitlist(join: boolean) {
@@ -182,8 +201,8 @@ export function BayDetail({ state, distance, onBack, onReserve }: { state: AppSt
 
   const notify = state.waiting ? (
     <div className="mt-5 flex flex-wrap items-center gap-3">
-      <p className="flex items-center gap-2 font-semibold text-brand-strong">
-        <BellRing className="size-5" /> We’ll hold it for you when it’s free
+      <p className="flex items-center gap-2 font-semibold text-ink">
+        <BellRing className="size-5 text-accent" /> We’ll hold it for you when it’s free
       </p>
       <Button variant="ghost" size="sm" loading={busy} onClick={() => waitlist(false)}>
         Stop waiting
@@ -198,8 +217,10 @@ export function BayDetail({ state, distance, onBack, onReserve }: { state: AppSt
   return (
     <div>
       <BackButton onBack={onBack} />
-      <span className={`inline-flex rounded-full px-3 py-1 text-sm font-semibold ${AVAILABILITY[availability].tone}`}>{AVAILABILITY[availability].label}</span>
-      <h2 className="mt-3 font-display text-3xl leading-tight">{state.bay.name}</h2>
+      <span className={`${chipClass} ${offline ? 'bg-warn-tint text-warn' : AVAILABILITY[availability].tone}`}>
+        {offline ? 'Offline' : AVAILABILITY[availability].label}
+      </span>
+      <h2 className="mt-3 font-display text-4xl leading-[0.95] tracking-[0.012em]">{state.bay.name}</h2>
       <p className="mt-1 text-muted">
         {state.bay.address} · {state.bay.powerKw} kW
         {distance !== null && ` · ${formatDistance(distance)} away`}
@@ -222,8 +243,14 @@ export function BayDetail({ state, distance, onBack, onReserve }: { state: AppSt
               The bay is free. It’s held for you to book for {formatCountdown(state.priority.until - now)}.
             </p>
           )}
-          <Button size="lg" className="w-full sm:w-auto" onClick={onReserve}>
-            Reserve for {formatEuro(state.quote.cents)}
+          {offline && (
+            <p role="status" className="mb-4 flex gap-3 rounded-2xl bg-warn-tint p-4 font-semibold text-ink">
+              <WifiOff className="mt-0.5 size-5 shrink-0 text-warn" />
+              {OFFLINE_TEXT}
+            </p>
+          )}
+          <Button size="lg" className="w-full sm:w-auto" disabled={offline} onClick={onReserve}>
+            Book this charger · {formatEuro(state.quote.cents)}
           </Button>
           <p className="mt-3 text-sm text-muted">
             {state.quote.demand} demand right now. Arrive within {state.holdMinutes} min, charge up to {state.session.maxMinutes / 60} h. Free to
@@ -272,7 +299,7 @@ export function BayDetail({ state, distance, onBack, onReserve }: { state: AppSt
           { icon: Zap, text: `${state.bay.powerKw} kW DC. Plug in and pay for charging as usual.` },
         ].map(({ icon: Icon, text }) => (
           <li key={text} className="flex gap-3 text-muted">
-            <Icon className="mt-0.5 size-5 shrink-0 text-brand" />
+            <Icon className="mt-0.5 size-5 shrink-0 text-ink" />
             {text}
           </li>
         ))}

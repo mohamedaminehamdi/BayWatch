@@ -1,11 +1,13 @@
 'use client';
 
-import { CircleCheck, FlaskConical, Mail, MailCheck, MailWarning, MailX, ShieldCheck, TriangleAlert } from 'lucide-react';
+import { ArrowDownToLine, CircleCheck, FlaskConical, Mail, MailCheck, MailWarning, MailX, ShieldCheck, TriangleAlert } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
 import { api } from '@/components/api';
 import { formatCountdown, formatTime, useNow } from '@/components/time';
 import { Button, chipClass } from '@/components/ui/button';
+import { Dialog } from '@/components/ui/dialog';
 import { PlateBadge } from '@/components/ui/plate-badge';
+import { hardwarePanel } from '@/lib/operator';
 import { CPO_SHARE, formatEuro } from '@/lib/pricing';
 import type { OperatorData } from '@/lib/server';
 import { WeekChart } from './week-chart';
@@ -30,7 +32,7 @@ function Tile({ label, value, context }: { label: string; value: string; context
   );
 }
 
-function LiveBay({ data, now }: { data: OperatorData; now: number }) {
+function LiveBay({ data, now, onLower }: { data: OperatorData; now: number; onLower: () => void }) {
   const r = data.reservation;
   const [status, detail] = data.blockedSince
     ? ['Car in the bay', `No booking, since ${formatTime(data.blockedSince)} (${formatCountdown(now - data.blockedSince)})`]
@@ -41,7 +43,7 @@ function LiveBay({ data, now }: { data: OperatorData; now: number }) {
         : r?.status === 'charging'
           ? ['Charging', 'Booked session in progress']
           : ['Free', 'Open to anyone, and reservable'];
-  const guardUp = data.hardware.state === 'blocked';
+  const hw = hardwarePanel(data.hardware, !!r, formatTime);
   return (
     <section aria-label="Live bay" className="rounded-3xl bg-brand-deep p-6 text-on-brand">
       <p className="flex items-center gap-2 font-mono text-xs font-semibold uppercase tracking-[0.1em] text-on-brand-muted">
@@ -53,11 +55,33 @@ function LiveBay({ data, now }: { data: OperatorData; now: number }) {
       </p>
       <p className="mt-3 font-display text-4xl leading-[0.9] tracking-[0.012em]">{status}</p>
       <p className="mt-2 text-on-brand">{detail}</p>
-      <p className="mt-5 flex items-center gap-2 border-t border-white/14 pt-4 font-mono text-xs uppercase tracking-[0.08em] text-on-brand-muted">
+      <p className="mt-5 flex flex-wrap items-center gap-2 border-t border-white/14 pt-4 font-mono text-xs uppercase tracking-[0.08em] text-on-brand-muted">
         <ShieldCheck className="size-4 text-mint" />
-        Guard {guardUp ? 'up' : 'down'}
-        {data.hardware.mock && ' · mock hardware'}
+        Guard {hw.guard}
+        {data.hardware.mock ? (
+          ' · mock hardware'
+        ) : (
+          <span className={`${chipClass} ${hw.online ? 'bg-mint/15 text-mint' : 'bg-danger text-white'}`}>{hw.online ? 'Online' : 'Offline'}</span>
+        )}
       </p>
+      {hw.warnings.map((w) => (
+        <p key={w} role="alert" className="mt-3 flex gap-2 rounded-xl bg-warn-tint p-3 text-sm font-medium text-warn">
+          <TriangleAlert className="mt-0.5 size-4 shrink-0" /> {w}
+        </p>
+      ))}
+      {hw.rows.length > 0 && (
+        <dl className="mt-4 grid grid-cols-2 gap-x-4 gap-y-2.5 text-sm">
+          {hw.rows.map(([k, v]) => (
+            <div key={k} className={k === 'Reading' ? 'col-span-2' : 'min-w-0'}>
+              <dt className="font-mono text-xs uppercase tracking-[0.08em] text-on-brand-muted">{k}</dt>
+              <dd className="break-words">{v}</dd>
+            </div>
+          ))}
+        </dl>
+      )}
+      <Button variant="on-brand" size="sm" className="mt-5" onClick={onLower}>
+        <ArrowDownToLine className="size-4" /> Lower the arm
+      </Button>
     </section>
   );
 }
@@ -67,6 +91,7 @@ export function OperatorDashboard() {
   const [data, setData] = useState<OperatorData | null>(null);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState<string | null>(null);
+  const [lowering, setLowering] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -196,7 +221,7 @@ export function OperatorDashboard() {
 
           {/* on phones the live bay comes right after the alerts; on desktop it heads the side column */}
           <div className="lg:hidden">
-            <LiveBay data={data} now={now} />
+            <LiveBay data={data} now={now} onLower={() => setLowering(true)} />
           </div>
 
           <section aria-labelledby="kpis">
@@ -226,7 +251,7 @@ export function OperatorDashboard() {
 
         <div className="grid gap-6">
           <div className="hidden lg:block">
-            <LiveBay data={data} now={now} />
+            <LiveBay data={data} now={now} onLower={() => setLowering(true)} />
           </div>
           <section aria-labelledby="log" className="rounded-2xl bg-surface p-5 ring-1 ring-line">
             <h2 id="log" className="font-display text-2xl leading-none tracking-[0.012em]">
@@ -247,6 +272,25 @@ export function OperatorDashboard() {
           </section>
         </div>
       </div>
+
+      <Dialog open={lowering} onClose={() => setLowering(false)} title="Lower the arm?">
+        <p className="text-lg">Any car can then park in the bay.</p>
+        <p className="mt-2 text-muted">
+          For when the arm is up without a booking, or a command timed out. A booking in progress isn’t changed.
+        </p>
+        <div className="mt-6 flex flex-wrap gap-3">
+          <Button
+            size="lg"
+            loading={busy === 'lower'}
+            onClick={() => run('lower', () => api('POST', '/api/operator/hardware/lower')).then(() => setLowering(false))}
+          >
+            Lower the arm
+          </Button>
+          <Button variant="secondary" size="lg" onClick={() => setLowering(false)}>
+            Not now
+          </Button>
+        </div>
+      </Dialog>
     </div>
   );
 }

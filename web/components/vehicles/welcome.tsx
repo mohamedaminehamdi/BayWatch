@@ -12,7 +12,7 @@ import type { Vehicle } from '@/lib/vehicles';
 import { VehicleForm } from './vehicle-form';
 
 const facts = [
-  { icon: ScanLine, text: 'At an Ecurious bay, the camera reads your plate and lowers the guard for you.' },
+  { icon: ScanLine, text: 'At a Baywatch bay, the camera reads your plate and lowers the guard for you.' },
   { icon: UserCheck, text: 'It only compares the plate with your own booking.' },
   { icon: EyeOff, text: 'Each booking forgets the plate when it ends. Delete the car any time.' },
 ];
@@ -28,26 +28,29 @@ export function Welcome() {
   return (
     <div className="mx-auto grid w-full max-w-5xl items-start gap-10 px-5 py-8 lg:grid-cols-[1fr_1.05fr] lg:gap-16 lg:py-16">
       <div>
-        <p className="font-semibold text-brand-strong">Welcome to Ecurious Reserve</p>
-        <h1 className="mt-2 font-display text-5xl leading-[0.98] tracking-tight">Add your car</h1>
+        {/* the product's one eyebrow (DESIGN.md: The One Eyebrow Rule) */}
+        <p className="inline-flex items-center gap-3 font-mono text-[0.8125rem] font-medium uppercase tracking-[0.16em] text-accent before:h-px before:w-6 before:bg-current before:opacity-70">
+          Welcome to Baywatch
+        </p>
+        <h1 className="mt-3 font-display text-6xl leading-[0.9] tracking-[0.012em]">Add your car</h1>
         <p className="mt-4 max-w-[40ch] text-lg text-muted">It takes a minute, and it’s how a reserved bay knows to let you in.</p>
         <BaySketch scene="arriving" className="mt-6 hidden w-64 lg:block" />
         <ul className="mt-6 grid gap-4">
           {facts.map(({ icon: Icon, text }) => (
             <li key={text} className="flex gap-3">
-              <Icon className="mt-0.5 size-5 shrink-0 text-brand" />
+              <Icon className="mt-0.5 size-5 shrink-0 text-ink" />
               <span className="text-muted">{text}</span>
             </li>
           ))}
         </ul>
       </div>
 
-      <section className="rounded-3xl bg-surface p-6 ring-1 ring-line sm:p-8">
+      <section className="rounded-2xl bg-surface p-6 ring-1 ring-line sm:p-8">
         {cars === null ? (
           <div className="h-80 animate-pulse rounded-2xl bg-sunken" />
         ) : cars.length ? (
           <div>
-            <h2 className="font-display text-2xl">You’re all set</h2>
+            <h2 className="font-display text-3xl leading-none tracking-[0.012em]">You’re all set</h2>
             <div className="mt-4 flex flex-wrap gap-3">
               {cars.map((c) => (
                 <PlateBadge key={c.id} plate={c.display} />
@@ -60,7 +63,7 @@ export function Welcome() {
         ) : (
           <>
             <VehicleForm submitLabel="Add car and find a bay" onAdded={() => router.push('/explore')} />
-            <Link href="/explore" className="mt-4 inline-block text-sm font-semibold text-muted underline underline-offset-2 hover:text-ink">
+            <Link href="/explore" className="mt-4 inline-flex min-h-11 items-center text-sm font-semibold text-muted underline underline-offset-2 hover:text-ink">
               Skip for now
             </Link>
           </>

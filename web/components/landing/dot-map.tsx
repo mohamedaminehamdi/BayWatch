@@ -74,7 +74,7 @@ export function DotMap({ dots, bayName }: { dots: Dot[]; bayName: string }) {
           <span className="size-2.5 rounded-full bg-context" /> Public charger, first come first served
         </li>
         <li className="flex items-center gap-2">
-          <span className="size-2.5 rounded-full bg-signal ring-1 ring-ink" /> Ecurious bay, reservable
+          <span className="size-2.5 rounded-full bg-signal ring-1 ring-ink" /> Baywatch bay, guarded
         </li>
       </ul>
     </div>

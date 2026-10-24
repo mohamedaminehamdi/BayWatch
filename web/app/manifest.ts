@@ -2,9 +2,9 @@ import type { MetadataRoute } from "next";
 
 export default function manifest(): MetadataRoute.Manifest {
   return {
-    name: "Ecurious Reserve",
-    short_name: "Reserve",
-    description: "Find public EV chargers and reserve an Ecurious bay.",
+    name: "Baywatch",
+    short_name: "Baywatch",
+    description: "Find public EV chargers and book a bay through Baywatch.",
     start_url: "/explore",
     display: "standalone",
     background_color: "#f5f4f1",

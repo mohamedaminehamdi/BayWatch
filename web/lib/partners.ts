@@ -96,14 +96,28 @@ export const commandResponse = (result: 'ACCEPTED' | 'REJECTED' | 'NOT_SUPPORTED
   ...extra,
 });
 
-// Thrown errors as OCPI answers. A refusal (bay taken, unknown id, price moved) is a normal REJECTED;
-// a malformed request is 400/413; our own failures are 5xx with a generic message, and logged here.
+// A 502 comes from the bay's hardware. If it said no for a reason (a car over the arm, the bay offline, a
+// command that just failed), that reason is the answer; if it didn't answer (a timeout, a dropped connection),
+// null: the caller sends a generic text. Our REST paths, the API key and device serials stay on the server,
+// and the engine's hardware messages never carry plates.
+const NO_ANSWER = /no answer in \d+ s|\b(ECONNREFUSED|ECONNRESET|ENOTFOUND|ETIMEDOUT|EHOSTUNREACH|ENETUNREACH|EAI_AGAIN|UND_ERR_\w+)\b|fetch failed/;
+function hardwareReason(text: string) {
+  if (NO_ANSWER.test(text)) return null;
+  const key = process.env.ECURIOUS_API_KEY;
+  return (key ? text.split(key).join('[key]') : text).replace(/\b(GET|POST) \/\S+: /g, '').replace(/\b[0-9a-f]{12,}\b/gi, '[serial]');
+}
+
+// Thrown errors as OCPI answers. A refusal (bay taken, unknown id, price moved, the hardware saying no) is a
+// normal REJECTED with its reason; a malformed request is 400/413; our own failures and hardware that doesn't
+// answer are 5xx with a generic message, and logged here.
 export function commandError(e: unknown): Reply {
   const status = (e as { status?: unknown } | null)?.status;
   const text = e instanceof Error ? e.message : String(e);
   if (status === 400 || status === 413) return { status, body: envelope(commandResponse('REJECTED', text), 2001, 'Invalid or missing parameters') };
   if (typeof status === 'number' && status < 500) return { status: 200, body: envelope(commandResponse('REJECTED', text)) };
   console.error('Partner command failed:', e);
+  const reason = status === 502 ? hardwareReason(text) : null;
+  if (reason) return { status: 200, body: envelope(commandResponse('REJECTED', reason)) };
   const hw = status === 502;
   return {
     status: hw ? 502 : 500,

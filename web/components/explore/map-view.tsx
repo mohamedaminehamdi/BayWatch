@@ -9,7 +9,7 @@ import type { Charger } from '@/lib/goingelectric';
 import type { Point } from '@/lib/geo';
 
 export type View = { center: Point; bounds: [number, number, number, number]; zoom: number };
-export type BayLook = 'free' | 'mine' | 'busy';
+export type BayLook = 'free' | 'mine' | 'busy' | 'offline';
 
 const maxPower = (c: Charger) => Math.max(0, ...c.points.map((p) => p.power));
 
@@ -60,6 +60,7 @@ export default function MapView({
   onSelectBay: () => void;
 }) {
   const ref = useRef<MapRef>(null);
+  const muted = bayLook === 'busy' || bayLook === 'offline'; // greyed pin; the label says which
   const [c] = useState(themeColors); // read once; this component only renders in the browser
   const data = useMemo(
     () => ({
@@ -156,16 +157,18 @@ export default function MapView({
       <Marker longitude={bay.lng} latitude={bay.lat} anchor="bottom" onClick={(e) => (e.originalEvent.stopPropagation(), onSelectBay())}>
         <button
           type="button"
-          aria-label={{ free: 'Ecurious bay, free to reserve', mine: 'Ecurious bay, booked by you', busy: 'Ecurious bay, taken right now' }[bayLook]}
+          aria-label={
+            { free: 'Baywatch bay, free to book', mine: 'Baywatch bay, booked by you', busy: 'Baywatch bay, taken right now', offline: 'Baywatch bay, offline right now' }[bayLook]
+          }
           className="group relative grid cursor-pointer place-items-center"
         >
           {bayLook === 'free' && <span className="absolute top-1 size-10 animate-pulse-ring rounded-full bg-signal/70" />}
           <span
             className={`relative grid size-11 place-items-center rounded-full rounded-br-none rotate-45 shadow-[0_8px_20px_-6px_rgb(15_20_25/0.45)] ring-3 transition-transform group-hover:scale-105 ${
-              bayLook === 'busy' ? 'bg-sunken ring-faint' : 'bg-signal ring-ink'
+              muted ? 'bg-sunken ring-faint' : 'bg-signal ring-ink'
             }`}
           >
-            <Zap className={`size-5 -rotate-45 ${bayLook === 'busy' ? 'fill-faint text-faint' : 'fill-ink text-ink'}`} />
+            <Zap className={`size-5 -rotate-45 ${muted ? 'fill-faint text-faint' : 'fill-ink text-ink'}`} />
           </span>
         </button>
       </Marker>

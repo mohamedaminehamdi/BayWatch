@@ -7,7 +7,7 @@ import { usePathname } from 'next/navigation';
 import { DemoPanel } from '@/components/demo-panel';
 import { chipClass } from '@/components/ui/button';
 import { Logo } from '@/components/ui/logo';
-import { formatCountdown, useNow } from '../time';
+import { formatTime } from '../time';
 import { useAppState } from './app-state';
 
 type Item = { href: string; label: string; icon: LucideIcon };
@@ -20,17 +20,17 @@ const ITEMS: Item[] = [
 const OPERATOR: Item = { href: '/operator', label: 'Operator', icon: Gauge };
 
 // While the driver has a live booking (or a bay held for them), it's one tap away from every screen
+// End times, not a ticking 14:56, which reads like a clock time next to "Session 13:23–14:23"
 function LivePill() {
   const { state } = useAppState();
-  const now = useNow();
   const r = state?.reservation;
   let label: string | null = null;
   let href = '/booking';
-  if (r?.mine && r.status === 'reserved') label = r.blockedSince ? 'Bay blocked · hold paused' : `Held for you · ${formatCountdown(r.expiresAt - now)}`;
+  if (r?.mine && r.status === 'reserved') label = r.blockedSince ? 'Bay blocked · hold paused' : `Held until ${formatTime(r.expiresAt)}`;
   else if (r?.mine && r.status === 'arrived') label = 'Checked in';
   else if (r?.mine && r.status === 'charging') label = 'Charging';
   else if (state?.priority?.mine) {
-    label = `Bay held for you to book · ${formatCountdown(state.priority.until - now)}`;
+    label = `Bay held for you · book by ${formatTime(state.priority.until)}`;
     href = '/explore';
   }
   if (!label) return null;
@@ -60,7 +60,7 @@ export function AppNav({ operator }: { operator: boolean }) {
     <>
       <header className="sticky top-0 z-(--z-nav) border-b border-line bg-page/90 backdrop-blur-sm">
         <div className="mx-auto flex h-14 max-w-7xl items-center gap-6 px-4 sm:px-6 lg:h-16">
-          <Link href="/explore" aria-label="Ecurious Reserve, explore" className="rounded-lg">
+          <Link href="/explore" aria-label="Baywatch, explore" className="rounded-lg">
             <Logo />
           </Link>
           <nav aria-label="App" className="hidden h-full items-stretch gap-1 lg:flex">

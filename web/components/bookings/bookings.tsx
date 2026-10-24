@@ -6,8 +6,8 @@ import { useEffect, useState } from 'react';
 import { api } from '@/components/api';
 import { useAppState } from '@/components/app/app-state';
 import { Receipt } from '@/components/booking/receipt';
-import { formatCountdown, formatDay, formatTime, useNow } from '@/components/time';
-import { buttonClass } from '@/components/ui/button';
+import { formatDay, formatTime } from '@/components/time';
+import { buttonClass, chipClass } from '@/components/ui/button';
 import { EmptyState } from '@/components/ui/empty-state';
 import { formatEuro } from '@/lib/pricing';
 import { ACTIVE, type ReservationView } from '@/lib/reservation';
@@ -22,7 +22,6 @@ const LIVE: Record<string, string> = { reserved: 'Held for you', arrived: 'Check
 
 export function Bookings() {
   const { state } = useAppState();
-  const now = useNow();
   const [list, setList] = useState<ReservationView[] | null>(null);
   const r = state?.reservation;
   const live = r?.mine && ACTIVE.has(r.status) ? r : null;
@@ -34,10 +33,10 @@ export function Bookings() {
 
   return (
     <div className="mx-auto w-full max-w-3xl px-5 py-8 sm:py-12">
-      <h1 className="font-display text-4xl">Bookings</h1>
+      <h1 className="font-display text-4xl leading-[0.95] tracking-[0.012em]">Bookings</h1>
 
       {live && (
-        <Link href="/booking" className="mt-6 flex items-center gap-4 rounded-3xl bg-brand-deep p-5 text-white hover:bg-brand-strong">
+        <Link href="/booking" className="mt-6 flex items-center gap-4 rounded-3xl bg-brand-deep p-5 text-on-brand hover:bg-brand-strong">
           <span className="relative flex size-3">
             <span className="absolute inset-0 animate-ping rounded-full bg-mint/70" />
             <span className="relative size-3 rounded-full bg-mint" />
@@ -45,18 +44,18 @@ export function Bookings() {
           <span className="flex-1">
             <span className="block font-semibold">
               {LIVE[live.status]}
-              {live.status === 'reserved' && !live.blockedSince && ` · ${formatCountdown(live.expiresAt - now)} left`}
+              {live.status === 'reserved' && !live.blockedSince && ` · until ${formatTime(live.expiresAt)}`}
               {live.blockedSince && ' · bay blocked, hold paused'}
             </span>
-            <span className="text-sm text-on-brand">{state?.bay.name}</span>
+            <span className="text-sm text-on-brand-muted">{state?.bay.name}</span>
           </span>
-          <span className="font-semibold text-signal">Open</span>
+          <span className="font-mono text-xs font-semibold uppercase tracking-[0.1em] text-signal">Open →</span>
         </Link>
       )}
 
-      <h2 className="mt-10 text-sm font-semibold text-muted">Past bookings</h2>
+      <h2 className="mt-10 font-mono text-xs font-medium uppercase tracking-[0.12em] text-muted">Past bookings</h2>
       <div className="mt-3 grid gap-3">
-        {list === null && <div className="h-24 animate-pulse rounded-3xl bg-sunken" />}
+        {list === null && <div className="h-24 animate-pulse rounded-2xl bg-sunken" />}
         {list?.length === 0 && (
           <EmptyState
             icon={Ticket}
@@ -71,16 +70,16 @@ export function Bookings() {
           </EmptyState>
         )}
         {list?.map((b) => (
-          <details key={b.id} className="group min-w-0 rounded-3xl bg-surface ring-1 ring-line open:ring-line-strong/50">
+          <details key={b.id} className="group min-w-0 rounded-2xl bg-surface ring-1 ring-line open:ring-line-strong">
             <summary className="flex cursor-pointer list-none items-center gap-3 p-4 sm:gap-4 sm:p-5 [&::-webkit-details-marker]:hidden">
-              <span className={`shrink-0 rounded-full px-3 py-1 text-sm font-semibold ${STATUS[b.status]?.tone}`}>{STATUS[b.status]?.label}</span>
+              <span className={`shrink-0 ${chipClass} ${STATUS[b.status]?.tone}`}>{STATUS[b.status]?.label}</span>
               <span className="min-w-0 flex-1">
                 <span className="block truncate font-semibold">{formatDay(b.createdAt ?? 0)}</span>
                 <span className="block truncate text-sm text-muted">
                   {formatTime(b.createdAt ?? 0)} · {b.vehicleLabel}
                 </span>
               </span>
-              <span className="font-semibold tabular-nums">{formatEuro(b.totalCents ?? 0)}</span>
+              <span className="font-mono font-semibold">{formatEuro(b.totalCents ?? 0)}</span>
               <ChevronDown className="size-5 text-muted transition-transform group-open:rotate-180" />
             </summary>
             <div className="border-t border-line px-5 pb-5 pt-4">

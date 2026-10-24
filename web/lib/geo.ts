@@ -9,4 +9,8 @@ export function distanceM(a: Point, b: Point) {
 
 export const formatDistance = (m: number) => (m < 1000 ? `${Math.max(10, Math.round(m / 10) * 10)} m` : `${(m / 1000).toFixed(1)} km`);
 
-export const directionsUrl = (p: Point) => `https://www.google.com/maps/dir/?api=1&destination=${p.lat},${p.lng}`;
+// Driving directions: without travelmode, Google can pick walking for short distances. `travelmode`
+// is the current Maps URL parameter and `dirflg=d` keeps older Maps clients on driving too. On
+// phones, dir_action=navigate starts turn-by-turn right away.
+export const directionsUrl = (p: Point) =>
+  `https://www.google.com/maps/dir/?api=1&destination=${p.lat},${p.lng}&travelmode=driving&dirflg=d&dir_action=navigate`;

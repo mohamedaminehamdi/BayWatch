@@ -49,7 +49,7 @@ export function Vehicles() {
     <div className="mx-auto w-full max-w-3xl px-5 py-8 sm:py-12">
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div>
-          <h1 className="font-display text-4xl">Your cars</h1>
+          <h1 className="font-display text-4xl leading-[0.95] tracking-[0.012em]">Your cars</h1>
           <p className="mt-1 text-muted">The camera at a reserved bay uses these plates to let you in.</p>
         </div>
         {cars && cars.length > 0 && cars.length < MAX && !adding && (
@@ -66,20 +66,20 @@ export function Vehicles() {
       )}
 
       <div className="mt-8 grid gap-4">
-        {cars === null && !error && <div className="h-28 animate-pulse rounded-3xl bg-sunken" />}
+        {cars === null && !error && <div className="h-28 animate-pulse rounded-2xl bg-sunken" />}
         {cars?.length === 0 && (
           <EmptyState icon={CarFront} title="No cars yet">
             Add the car you drive. You agree to plate recognition once, per car.
           </EmptyState>
         )}
         {cars?.map((c) => (
-          <article key={c.id} className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-4 gap-y-3 rounded-3xl bg-surface p-5 ring-1 ring-line sm:grid-cols-[auto_minmax(0,1fr)_auto]">
+          <article key={c.id} className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-4 gap-y-3 rounded-2xl bg-surface p-5 ring-1 ring-line sm:grid-cols-[auto_minmax(0,1fr)_auto]">
             <div className="col-span-2 sm:col-span-1">
               <PlateBadge plate={c.display} size="lg" />
             </div>
             <div className="min-w-0">
               <p className="truncate text-lg font-semibold">{c.label}</p>
-              <p className="text-sm text-muted">Plate recognition on since {formatDay(c.consentAt)}</p>
+              <p className="mt-0.5 font-mono text-xs uppercase tracking-[0.08em] text-muted">Plate recognition on · since {formatDay(c.consentAt)}</p>
             </div>
             <Button variant="ghost" onClick={() => setRemoving(c)} aria-label={`Delete ${c.label}`}>
               <Trash2 className="size-5" /> Delete
@@ -87,8 +87,8 @@ export function Vehicles() {
           </article>
         ))}
         {cars && (cars.length === 0 || adding) && (
-          <section className="rounded-3xl bg-surface p-6 ring-1 ring-line sm:p-8">
-            <h2 className="mb-5 font-display text-2xl">Add a car</h2>
+          <section className="rounded-2xl bg-surface p-6 ring-1 ring-line sm:p-8">
+            <h2 className="mb-5 font-display text-3xl leading-none tracking-[0.012em]">Add a car</h2>
             {form}
           </section>
         )}

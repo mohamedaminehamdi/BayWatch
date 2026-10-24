@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { dayKey, lastDays, simulateWeek, weekStats } from './operator.ts';
+import { dayKey, hardwarePanel, lastDays, simulateWeek, weekStats } from './operator.ts';
 import { createReservations, type Alert, type Reservation } from './reservation.ts';
 
 const MIN = 60_000;
@@ -111,4 +111,46 @@ test('simulating again replaces the simulated data, and real drivers never see i
   assert.equal(alerts.filter((x) => x.simulated).length, sim.alerts.length);
   assert.deepEqual(r.bookings('user_anna').map((b) => b.status), ['cancelled'], 'her own booking only');
   assert.ok(r.operatorState().alerts.every((a) => a.status === 'resolved'), 'simulated alerts are all closed');
+});
+
+test('hardware panel: the guard and its warnings, and the device readings with real hardware only', () => {
+  const time = (at: number) => new Date(at).toISOString().slice(11, 16);
+  assert.deepEqual(hardwarePanel({ state: 'free', mock: true, online: true }, false, time), { guard: 'down', online: true, warnings: [], rows: [] });
+  const live = hardwarePanel(
+    {
+      state: 'blocked',
+      mock: false,
+      lockId: 'lock-0002',
+      online: false,
+      carPresence: 'vacant',
+      autoUnlock: 'any',
+      battery12V: 15.04,
+      signalStrength4G: 0,
+      waterIngress: false,
+      activeErrors: [],
+      lastSeenAt: '2026-10-24T11:20:57.105Z',
+      events: true,
+      stale: true,
+      error: 'GET /locks/lock-0002: no answer in 5 s',
+      updatedAt: Date.parse('2026-10-24T11:21:00Z'),
+    },
+    false,
+    time,
+  );
+  assert.equal(live.guard, 'up');
+  assert.equal(live.online, false);
+  assert.deepEqual(live.warnings, ['The camera lowers the arm for any car: the hold isn’t enforced.', 'Arm up without a booking.']);
+  assert.deepEqual(Object.fromEntries(live.rows), {
+    Bay: 'lock-0002',
+    'Car sensor': 'vacant',
+    'Live events': 'on',
+    '12 V battery': '15.0 V',
+    Signal: '0',
+    Water: 'dry',
+    Errors: 'none',
+    'Last seen': '11:20',
+    Reading: 'stale since 11:21: GET /locks/lock-0002: no answer in 5 s',
+  });
+  assert.deepEqual(hardwarePanel({ state: 'blocked', mock: false, online: true }, true, time).warnings, [], 'the arm is up for a booking: as it should be');
+  assert.equal(hardwarePanel({ state: 'unknown', mock: false }, false, time).guard, 'unknown');
 });

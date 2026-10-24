@@ -1,8 +1,9 @@
-// Operator statistics over the last 7 calendar days, and the "Simulate a week" demo data.
+// Operator statistics over the last 7 calendar days, the "Simulate a week" demo data, and the hardware panel.
 // Pure functions: the reservation store hands in its records, nothing here touches state.
 
 import { cancellationFee, noShowFee, OVERSTAY_GRACE_MS, overstayFee, reservationFee, type ReservationType } from './booking-rules.ts';
 import { CHARGE_LABELS, CPO_SHARE, EXTENSION_MS, PRICES, total, type Charge } from './pricing.ts';
+import type { HardwareStatus } from './ecurious.ts';
 import type { Alert, Reservation, Status } from './reservation.ts';
 
 const MIN = 60_000;
@@ -156,4 +157,28 @@ export function simulateWeek(
     }
   }
   return { records, alerts };
+}
+
+// The live bay's hardware on the dashboard: the guard, what to warn about and, with real hardware, the device's
+// readings. `booked` = a booking is active; `time` formats a timestamp for the viewer. Never holds a plate.
+export function hardwarePanel(hw: HardwareStatus, booked: boolean, time: (at: number) => string) {
+  const guard = hw.state === 'unknown' ? 'unknown' : hw.state === 'blocked' ? 'up' : 'down';
+  const warnings = [
+    hw.autoUnlock === 'any' && 'The camera lowers the arm for any car: the hold isn’t enforced.',
+    hw.state === 'blocked' && !booked && 'Arm up without a booking.',
+  ].filter((w): w is string => !!w);
+  const rows: [string, string][] = hw.mock
+    ? []
+    : [
+        ['Bay', hw.lockId ?? '–'],
+        ['Car sensor', hw.carPresence ?? '–'],
+        ['Live events', hw.events ? 'on' : 'off'],
+        ['12 V battery', hw.battery12V == null ? '–' : `${hw.battery12V.toFixed(1)} V`],
+        ['Signal', hw.signalStrength4G == null ? '–' : String(hw.signalStrength4G)],
+        ['Water', hw.waterIngress == null ? '–' : hw.waterIngress ? 'detected' : 'dry'],
+        ['Errors', hw.activeErrors?.length ? hw.activeErrors.join(', ') : 'none'],
+        ['Last seen', hw.lastSeenAt ? time(Date.parse(hw.lastSeenAt)) : '–'],
+        ...(hw.stale ? [['Reading', `stale since ${hw.updatedAt ? time(hw.updatedAt) : 'the start'}: ${hw.error ?? 'no answer'}`] as [string, string]] : []),
+      ];
+  return { guard, online: hw.online !== false, warnings, rows };
 }

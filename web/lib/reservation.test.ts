@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createReservations, type Alert } from './reservation.ts';
+import { createReservations, FALLBACK_EVIDENCE_MS, type Alert } from './reservation.ts';
 
 const ANNA = 'user_anna';
 const BEN = 'user_ben';
@@ -191,11 +191,54 @@ test('end-of-session reminders: 1 h and 15 min before the end, only once the car
   assert.deepEqual(early.r.state(ANNA).reservation?.sentReminders, [], 'checked at send time: not sent while still reserved');
 });
 
-test('hardware failure rolls the reservation back', async () => {
-  const hw = { reserve: async () => { throw new Error('offline'); }, release: async () => {} };
+test('reserving hands the booked plate to the hardware; a refusal rolls the booking back, with its reason', async () => {
+  const sent: unknown[] = [];
+  const ok = createReservations({ hw: { reserve: async (plates?: string[]) => void sent.push(plates), release: async () => {} }, type: 'fast', bay: BAY });
+  await ok.reserve(ANNA, 'm-ab 1234', 'Car', 60 * MIN);
+  assert.deepEqual(sent, [['MAB1234']], 'normalised, for the camera’s own allow-list');
+
+  const hw = { reserve: async () => { throw new Error('A car is over the arm, so it was not raised'); }, release: async () => {} };
   const r = createReservations({ hw, type: 'fast', bay: BAY });
-  await assert.rejects(r.reserve(ANNA, 'MAB1234', 'Car', 60 * MIN), { status: 502 });
+  await assert.rejects(r.reserve(ANNA, 'MAB1234', 'Car', 60 * MIN), {
+    status: 502,
+    message: 'The bay could not be reserved: A car is over the arm, so it was not raised',
+  });
   assert.equal(r.state(ANNA).reservation, null);
+});
+
+test('a hardware failure while cancelling is a 502, and the booking stays until it works', async () => {
+  let down = true;
+  const hw = { reserve: async () => {}, release: async () => { if (down) throw new Error('Lock 0002 is offline'); } };
+  const r = createReservations({ hw, type: 'fast', bay: BAY });
+  await r.reserve(ANNA, 'MAB1234', 'Car', 60 * MIN);
+  await assert.rejects(r.cancel(ANNA), { status: 502, message: 'Could not release the bay: Lock 0002 is offline' });
+  assert.equal(r.state(ANNA).reservation?.status, 'reserved');
+  assert.equal(r.state(ANNA).reservation?.charges?.length, 1, 'no refund line yet');
+  down = false;
+  assert.equal((await r.cancel(ANNA)).status, 'cancelled');
+});
+
+test('the car leaving ends the session with no plate needed, or clears a car blocking the bay', async () => {
+  const { r, book, advance } = setup();
+  await book(ANNA, 'MAB1234', 30);
+  r.vacated();
+  assert.equal(r.state(ANNA).reservation?.status, 'reserved', 'nobody had checked in: nothing to end');
+  await r.plateEvent('');
+  await r.checkInManually(ANNA, BAY); // checked in by hand, so the camera never matched a plate
+  await advance(50 * MIN);
+  r.vacated();
+  const done = r.state(ANNA).reservation;
+  assert.equal(done?.status, 'completed');
+  assert.equal(done?.totalCents, 250 + 5 * 25, 'overstay billed: 5 min past the 15-min grace');
+
+  const blocked = setup();
+  const { expiresAt } = await blocked.book();
+  await blocked.r.plateEvent('BXY987');
+  await blocked.advance(4 * MIN);
+  blocked.r.vacated();
+  const resumed = blocked.r.state(ANNA).reservation;
+  assert.equal(resumed?.blockedSince, null);
+  assert.equal(resumed?.expiresAt, expiresAt + 4 * MIN, 'the hold resumes, with the paused time added back');
 });
 
 test('only the reserving driver can cancel or finish', async () => {
@@ -325,6 +368,24 @@ test('unreadable plate: no alert, and the driver can check in at the bay instead
   assert.equal(inside.status, 'arrived');
   assert.equal(inside.checkInMethod, 'fallback');
   assert.deepEqual(calls, ['reserve', 'release']);
+});
+
+test('fallback check-in needs the camera to have seen a car in the last 3 min: location alone never opens the bay', async () => {
+  const { r, calls, book, advance } = setup();
+  await book();
+  await assert.rejects(r.checkInManually(ANNA, BAY), { status: 409 }, 'no evidence, even inside the geofence');
+  assert.equal(r.state(ANNA).reservation?.carAtBay, false);
+
+  await r.plateEvent('');
+  assert.equal(r.state(ANNA).reservation?.carAtBay, true, 'the app shows "I’m at the bay"');
+  assert.equal(r.state(BEN).reservation?.carAtBay, undefined, 'owner only');
+  await advance(FALLBACK_EVIDENCE_MS + 1);
+  assert.equal(r.state(ANNA).reservation?.carAtBay, false);
+  await assert.rejects(r.checkInManually(ANNA, BAY), { status: 409 }, 'the evidence is too old');
+  assert.deepEqual(calls, ['reserve'], 'the bay stays closed');
+
+  await r.plateEvent('');
+  assert.equal((await r.checkInManually(ANNA, BAY)).checkInMethod, 'fallback');
 });
 
 test('fallback check-in is refused while another car is in the bay', async () => {

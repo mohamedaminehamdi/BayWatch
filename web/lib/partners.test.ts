@@ -144,11 +144,57 @@ test('envelope and error mapping: refusals are REJECTED, our own failures give n
     assert.equal(map(err(403, 'This reservation belongs to another driver')).status, 200);
     assert.deepEqual([map(err(400, 'Invalid JSON')).status, map(err(400, 'x')).code], [400, 2001]);
     assert.deepEqual([map(err(413, 'Request body too large')).status, map(err(413, 'x')).code], [413, 2001]);
-    const hw = map(err(502, 'Reservation hardware did not respond: connect ECONNREFUSED 10.0.0.7:8443'));
-    assert.deepEqual([hw.status, hw.code, hw.result], [502, 3000, 'REJECTED']);
-    assert.ok(!hw.text.includes('10.0.0.7'), 'hardware details stay in our logs');
     assert.deepEqual([map(err(undefined, 'TypeError deep inside')).text, map('weird').status], ['Internal error', 500]);
   });
+});
+
+test('the bay’s hardware: a refusal is REJECTED with its reason, no answer is a 502, and nothing internal leaks', async () => {
+  const err = (message: string) => Object.assign(new Error(message), { status: 502 });
+  const map = (message: string) => {
+    const { status, body } = commandError(err(message));
+    return { status, code: body.status_code, result: (body.data as { result: string }).result, text: (body.data as { message: { text: string }[] }).message[0].text };
+  };
+  process.env.ECURIOUS_API_KEY = 'k-test-0123456789';
+  try {
+    await muted(() => {
+      const busy = 'The bay could not be reserved: A car is over the arm, so it was not raised';
+      assert.deepEqual(map(busy), { status: 200, code: 1000, result: 'REJECTED', text: busy });
+      assert.equal(
+        map('The bay could not be reserved: Lock 0002 is offline (last seen 2026-10-24T10:29:57.105Z)').text,
+        'The bay could not be reserved: Lock 0002 is offline (last seen 2026-10-24T10:29:57.105Z)',
+      );
+      assert.equal(
+        map('Could not release the bay: POST /locks/lock-0002/unlock: device 6688202620000002 rejected key k-test-0123456789').text,
+        'Could not release the bay: device [serial] rejected key [key]',
+        'no REST path, serial or key',
+      );
+      const generic = { status: 502, code: 3000, result: 'REJECTED', text: 'The bay’s hardware did not respond. Try again in a minute.' };
+      assert.deepEqual(map('The bay could not be reserved: POST /locks/lock-0002/lock: no answer in 8 s'), generic, 'a timeout');
+      assert.deepEqual(map('Could not release the bay: POST /locks/lock-0002/unlock: ECONNREFUSED'), generic, 'a dropped connection');
+    });
+  } finally {
+    delete process.env.ECURIOUS_API_KEY;
+  }
+
+  // end to end: the adapter refuses, nothing is booked, and the partner learns why
+  const hw = { reserve: async () => { throw new Error('A car is over the arm, so it was not raised'); }, release: async () => {} };
+  const r = createReservations({ hw, bay: { lat: 52.52, lng: 13.405 }, type: 'fast' });
+  const { token } = setup();
+  const res = await muted(() =>
+    runCommand('acme', 'RESERVE_NOW', async () => ({
+      token,
+      expiry_date: new Date(Date.now() + 15 * MIN).toISOString(),
+      reservation_id: 'R-HW',
+      location_id: bayId,
+      ecurious_license_plate: 'M-AB 1234',
+      ecurious_plate_consent: true,
+      ecurious_session_minutes: 60,
+      ecurious_fee_cents: r.quote(null).cents,
+    }), partnerBay(r, new Map())),
+  );
+  assert.equal(res.status, 200);
+  assert.match((res.body.data as { message: { text: string }[] }).message[0].text, /car is over the arm/);
+  assert.equal(r.state(null).reservation, null);
 });
 
 test('rate limit: 60 requests a minute per partner, then Retry-After', () => {

@@ -1,6 +1,6 @@
 # Design System: Ecurious Reserve
 
-Phase 1 proposal, 2026-10-24. **Phase 2a (applied):** §2, §3, §7.1–7.6 (except the Demo trigger row, which is in the builder's `demo-panel.tsx`) and §7.12. **Still to apply in 2b:** that row and §7.7–7.11. It moves the app from its self-chosen green, yellow and Barlow look to the Ecurious brand system. §2 holds the paste-ready tokens, and §7 lists every screen change in the order to apply them. Token names are the ones in `app/globals.css` as of 12:08 today, including `context`, `location`, `plate-blue` and `plate-star`. If a class string quoted in §7 has changed since then, apply the intent in the "Change to" column.
+Phase 1 proposal, 2026-10-24. **Applied (phases 2a and 2b):** §2, §3 and all of §7. The header pill shows end times ("Held until 13:38"), and an offline bay (`hardware.online === false`) can't be reserved. It moves the app from its self-chosen green, yellow and Barlow look to the Ecurious brand system. §2 holds the paste-ready tokens, and §7 lists every screen change in the order to apply them. Token names are the ones in `app/globals.css` as of 12:08 today, including `context`, `location`, `plate-blue` and `plate-star`. If a class string quoted in §7 has changed since then, apply the intent in the "Change to" column.
 
 ## 1. Overview
 
@@ -84,7 +84,7 @@ Every amount, share and duration comes from `lib/pricing.ts` (`feeRules()`, `boo
 ### Primary
 
 - **Ink** (`#0F1419`): the text, primary buttons, stepper fill, selected rings, DC map rings and clusters, and the dark bands. Tokens: `ink`, `brand`, `brand-deep`.
-- **Ink soft** (`#1F2933`): hover for ink, the raised dark card on an ink band, and text on lime tints. Tokens: `brand-strong` (and `dc`, which is unused).
+- **Ink soft** (`#1F2933`): hover for ink, the raised dark card on an ink band, and text on lime tints. Token: `brand-strong`. (The unused `dc` token was removed.)
 
 ### Secondary: voltage lime
 
@@ -151,7 +151,6 @@ Replace the whole `@theme { … }` block in `app/globals.css` with this. It keep
   --color-warn-tint: oklch(0.9512 0.0254 56.1); /* #FDEBDF */
   --color-danger: oklch(0.5013 0.1783 28.7); /* #B3261E */
   --color-danger-tint: oklch(0.9464 0.0221 24.4); /* #FCE8E6 */
-  --color-dc: oklch(0.276 0.0233 248.7); /* #1F2933 unused: delete once nothing references it */
 
   /* map and chart roles */
   --color-context: oklch(0.6247 0.0076 247.9); /* #84888C public chargers: 3:1 on surface and on the map's land */
