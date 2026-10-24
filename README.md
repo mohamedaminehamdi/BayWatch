@@ -1,20 +1,66 @@
-# Baywatch
-
-**Project board:** [BayWatch on Notion](https://app.notion.com/p/BayWatch-4032e6d9e3bb8033b730de17ef7f7b33?source=copy_link)
-
-**Your charging spot, kept free.** Book any public charger for a time slot. On Baywatch bays, an Ecurious lock holds the bay, and its camera lets your car in by its license plate. Built for the Ecurious challenge at the Watt the Hack hackathon.
-
-[![Watch the 90-second demo](docs/screenshots/video-poster.jpg)](baywatch_demo_90s.mp4)
-
-<p align="center"><em>The 90-second demo: <a href="baywatch_demo_90s.mp4">baywatch_demo_90s.mp4</a> (1080p, 8 MB).</em></p>
-
 <p align="center">
-  <img src="docs/screenshots/landing-desktop.png" alt="The Baywatch landing page on a desktop: 'Your charging spot, kept free', with live bay status and a phone showing a held booking" width="66%">
-  &nbsp;
-  <img src="docs/screenshots/landing-phone.png" alt="The Baywatch landing page on a phone" width="27%">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/logo-dark.png">
+    <img src="docs/screenshots/logo.png" alt="Baywatch" width="320">
+  </picture>
 </p>
 
-**Status (2026-10-24):**
+<p align="center"><strong>Your charging spot, kept free.</strong></p>
+
+<p align="center">
+Baywatch lets EV drivers book a public charger for a time slot, or take one right now with <strong>Book now</strong>.<br>
+At a Baywatch bay, a real Ecurious lock keeps the bay free until you arrive, and its camera lowers the arm for your plate only.<br>
+Operators get blocked-bay alerts and a dashboard, and other charging apps can book through our OCPI-style API.
+</p>
+
+<p align="center">
+  <a href="baywatch_demo_90s.mp4"><strong>▶ Watch the 90-second demo</strong></a>
+  &nbsp;·&nbsp;
+  <a href="https://app.notion.com/p/BayWatch-4032e6d9e3bb8033b730de17ef7f7b33?source=copy_link">Project board</a>
+  &nbsp;·&nbsp;
+  Built for the Ecurious challenge at Watt the Hack
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/app-explore.png" alt="Explore: the three Baywatch bays in violet and every GoingElectric charger on the map, each with Book now" width="100%">
+</p>
+<p align="center">
+  <img src="docs/screenshots/app-book-now.png" alt="Book now on Baywatch Bay 2: starts now, the price fixed at booking, and the real barrier goes up at once" width="49%">
+  <img src="docs/screenshots/app-booking-held.png" alt="Your booking: held for you, 14:56 left to arrive, the camera reads your plate and lowers the guard" width="49%">
+</p>
+<p align="center"><sub><strong>Explore</strong> every charger, <strong>Book now</strong> (shown at peak demand, the €10 cap), and the bay <strong>held for you</strong> until you arrive. Screenshots of the running app.</sub></p>
+
+<p align="center">
+  <a href="baywatch_demo_90s.mp4"><img src="docs/screenshots/video-poster.jpg" alt="Watch the 90-second demo" width="80%"></a>
+</p>
+
+<details>
+<summary><strong>More screens</strong>: the landing page and scenes from the demo video</summary>
+
+<p align="center">
+  <img src="docs/screenshots/landing-how.png" alt="How it works: find a charger, book a slot, arrive and the camera lets you in" width="49%">
+  <img src="docs/screenshots/landing-at-the-bay.png" alt="At the bay: the guard is up, and the camera waits for your plate" width="49%">
+</p>
+<p align="center">
+  <img src="docs/screenshots/video-map.jpg" alt="Explore: Baywatch Bay 1 on the map, with Book now" width="49%">
+  <img src="docs/screenshots/video-booking.jpg" alt="Booking: €5.00 at normal demand, the fees accepted, booked" width="49%">
+</p>
+<p align="center">
+  <img src="docs/screenshots/video-held.jpg" alt="Held for you: 14:59 left to arrive, with the barrier up" width="49%">
+  <img src="docs/screenshots/video-occupied.jpg" alt="Your bay is occupied: credits added, free chargers nearby" width="49%">
+</p>
+<p align="center">
+  <img src="docs/screenshots/video-operator-alert.jpg" alt="Bay blocked: a car without a booking is detected, the operator is alerted and the driver re-routed" width="49%">
+  <img src="docs/screenshots/video-revenue.jpg" alt="Operator dashboard: charging revenue, sessions and bay utilisation (includes simulated data)" width="49%">
+</p>
+<p align="center">
+  <img src="docs/screenshots/video-voice-api.jpg" alt="Voice booking ('Hey Siri, call Baywatch') and a partner app's RESERVE_NOW call, accepted" width="70%">
+</p>
+
+</details>
+
+## Status (2026-10-24)
+
 - **Built:**
   - **The full cycle on real hardware, run live** on 24 Oct at 17:10–17:14 on Bay 2 (`lock-0003`):
     1. Booked with "Book now".
@@ -23,12 +69,12 @@
     4. The car left, the arm went up again, and the list was emptied.
   - **Booking v2:** every GoingElectric charger is bookable on a 15-minute grid, up to 60 days ahead. **Book now** books this exact moment: from the 15-minute block under way, for at least an hour.
   - **Three Baywatch bays:** `bw-1` → `lock-0001` and `bw-2` → `lock-0003` are real Ecurious locks, and `bw-3` has no hardware. The lock service's list of the team's locks decides which can be used.
-  - **Booking rules:** class and demand pricing (€5 for a standard reservation, cap €10), a 100% no-show fee, cancellation tiers, overstay after 5 free minutes, blocked-bay re-routing with a €5 credit, and walk-up unlock.
+  - **Booking rules:** demand pricing (from €4 per booking at a fast bay, €5 at normal demand, never above €10), a 100% no-show fee, cancellation tiers, overstay after 5 free minutes, blocked-bay re-routing with a €5 credit, and walk-up unlock.
   - The operator dashboard, the partner API (OCPI-style), and voice booking (Vapi).
   - **The Flutter app** ([mobile/](mobile/)): every web screen ported to Flutter, on the same API and Clerk accounts. Tested in Chrome; Android and iOS are configured but not yet built ([mobile/README.md](mobile/README.md)).
 - **Not wired yet:** Stripe card payments are built and tested (test mode), but the app uses the demo payment for now ([payments.md](docs/payments.md)).
 
-**Code:** the private GitHub repo [BayWatch](https://github.com/mohamedaminehamdi/BayWatch). Working branch: `feat/booking-v2-voice-pricing` ([PR #1](https://github.com/mohamedaminehamdi/BayWatch/pull/1)).
+**Code:** the private GitHub repo [BayWatch](https://github.com/mohamedaminehamdi/BayWatch), on `main`.
 
 ## The challenge in short
 
@@ -42,19 +88,10 @@ Full brief: [CHALLENGE.md](CHALLENGE.md).
 | Deliverable | Where |
 |---|---|
 | 1. App prototype showing GoingElectric charge points | [web/](web/): Explore map and list with live GoingElectric data, every charger bookable |
-| 2. Full reservation cycle on the hardware | `bw-1` and `bw-2` drive the real Ecurious locks, run live on 24 Oct ([status](#baywatch)): [data flows §1](docs/data-flows.md#1-book--arrive--charge--leave-a-bay-with-a-real-lock) and [hardware-integration.md](docs/hardware-integration.md) |
+| 2. Full reservation cycle on the hardware | `bw-1` and `bw-2` drive the real Ecurious locks, run live on 24 Oct ([status](#status-2026-10-24)): [data flows §1](docs/data-flows.md#1-book--arrive--charge--leave-a-bay-with-a-real-lock) and [hardware-integration.md](docs/hardware-integration.md) |
 | 3. Documentation: architecture, API calls, data flows, decisions, tools, what didn't work | [docs/](#docs) |
 | 4. Answers to at least two mission areas | Six areas: [docs/mission-areas.md](docs/mission-areas.md) |
 | 5. Limitations and scaling | [docs/limitations-and-scaling.md](docs/limitations-and-scaling.md) |
-
-## How it works
-
-<p align="center">
-  <img src="docs/screenshots/landing-how.png" alt="How it works: find a charger, book a slot, arrive and the camera lets you in" width="49%">
-  <img src="docs/screenshots/landing-at-the-bay.png" alt="At the bay: the guard is up, and the camera waits for your plate" width="49%">
-</p>
-
-<sub>Screenshots of the running app (landing page, signed out). The scenes further down are from the demo video.</sub>
 
 ## User flows
 
@@ -62,29 +99,17 @@ Full brief: [CHALLENGE.md](CHALLENGE.md).
 1. Land on the home page. Sign up or sign in with Google or email (Clerk). The first reservation is free.
 2. Add your car: plate, nickname, and consent to plate recognition.
 3. **Explore:** the three Baywatch bays (big violet dots) and every GoingElectric charger, with search, "Locate me" and a fast filter. A virtual LED shows whether a bay can be unlocked right now.
-4. **Book now:** one tap books this moment, from the 15-minute block under way, for at least an hour (16:23 → 16:15–17:30). On a Baywatch bay, the barrier goes up at once. **Choose a time** picks a start on the grid (today or up to 60 days ahead) and a length up to the bay's class maximum (slow 4 h, fast 2 h, ultra 1 h). You see:
-   - **The price:** €5 for a standard fast reservation, more at busy hours, never above €10.
+4. **Book now:** one tap books this moment, from the 15-minute block under way, for at least an hour (16:23 → 16:15–17:30). On a Baywatch bay, the barrier goes up at once. **Choose a time** picks a start on the grid (today or up to 60 days ahead) and a length up to the bay's maximum (2 h at a fast bay). You see:
+   - **The price:** from €4 for an hour at a fast bay, €5 at normal demand, never above €10. It's fixed once you book.
    - **The credit used.**
    - **The cancellation schedule.**
 
    Accept the fees and pay (demo payment). At most 3 upcoming bookings.
-
-   <p align="center">
-     <img src="docs/screenshots/video-map.jpg" alt="Explore: the map with Baywatch Bay 1 and its Book now button" width="49%">
-     <img src="docs/screenshots/video-booking.jpg" alt="Booking: €5.00 at normal demand, the fees accepted, booked" width="49%">
-   </p>
-
 5. **Your booking:**
    - reminders the day before, 30 min before (the booking goes live) and 5 min before;
    - Navigate (by car), and arrive within 15 min of the start (of booking, for Book now).
    - On a Baywatch bay, the arm rises 10 min before the start (at once for Book now). The camera's allow-list holds only your plate, so the camera lowers the arm for your car. Misreads are tolerated, and "I'm at the bay" works when the camera saw your car but couldn't read the plate.
 6. **Blocked bay:** if another car is in your bay, you're re-routed to the nearest free bays ("Book instead"), you get a **€5 credit**, and you can cancel for free.
-
-   <p align="center">
-     <img src="docs/screenshots/video-held.jpg" alt="Held for you: 14:59 left to arrive, with the barrier up" width="49%">
-     <img src="docs/screenshots/video-occupied.jpg" alt="Your bay is occupied: credits added, free chargers nearby" width="49%">
-   </p>
-
 7. **Charge, then leave:** 5 free minutes after your slot, then €0.30/min. You get a receipt, and your history is under Bookings.
 8. **Walk-up:** at a free bay, "Unlock now" lets you in at once, free, until the next booking. On a real lock, the camera must read one of your own plates.
 9. **Voice:** tap the mic and say "Book bay 1 now for an hour". The assistant reads the quote back and books when you say yes ([voice-booking.md](docs/voice-booking.md)).
@@ -93,27 +118,17 @@ Full brief: [CHALLENGE.md](CHALLENGE.md).
 - **Per real bay:** status, blocked-bay alerts (with email), and the hardware panel (guard, sensor, health, "Lower the arm").
 - **7-day KPIs:** including credits issued, walk-ups, and the overstay split.
 
-<p align="center">
-  <img src="docs/screenshots/video-operator-alert.jpg" alt="Bay blocked: the camera reads a car without a booking, the operator is alerted and the driver re-routed" width="49%">
-  <img src="docs/screenshots/video-revenue.jpg" alt="Operator dashboard: charging revenue, sessions, bay utilisation (includes simulated data)" width="49%">
-</p>
-
-**Partner app:** reserve a bay by id through OCPI-style `RESERVE_NOW`, with an optional `ecurious_start` and `ecurious_blocks` ([api.md](docs/api.md)). Other apps link drivers to a public bay page.
-
-<p align="center">
-  <img src="docs/screenshots/video-voice-api.jpg" alt="Voice booking ('Hey Siri, call Baywatch') and a partner app's RESERVE_NOW call, accepted" width="66%">
-  &nbsp;
-  <img src="docs/screenshots/bay-page-phone.png" alt="The public bay page partner apps link to: Baywatch Bay 2, free, with Book now and Navigate by car" width="27%">
-</p>
+**Partner app:** reserve a bay by id through OCPI-style `RESERVE_NOW`, with an optional `ecurious_start` and `ecurious_blocks` ([api.md](docs/api.md)). Other apps can also link drivers to a public bay page (`/bay/{id}`).
 
 ## Pricing
 
-<p align="center">
-  <img src="docs/screenshots/landing-pricing.png" alt="Pricing: from €2 per booking for drivers, €19 per bay per month for operators" width="58%">
-  <img src="docs/screenshots/video-pricing.jpg" alt="Priced by zone, priced live: the fee follows demand" width="40%">
-</p>
+- **Drivers** pay one reservation fee per booking, fixed when they book: from €4 for an hour at a fast bay, €5 at normal demand, never more than €10.
+  - Cancelling is free for 2 minutes after booking.
+  - A no-show keeps the fee.
+  - After the slot, there are 5 free minutes to leave, then €0.30 a minute, at most €12.
+- **Operators** pay €19 per bay per month for Bay Guard: blocked-bay alerts, the dashboard and the partner API.
 
-Drivers pay per booking, set by class and demand, never above €10. Operators pay €19 per bay per month for Bay Guard (alerts, dashboard, the partner API). Numbers and sources: [reservation-model.md](docs/reservation-model.md) and [unit-economics.md](docs/unit-economics.md).
+Rules and sources: [reservation-model.md](docs/reservation-model.md) and [unit-economics.md](docs/unit-economics.md).
 
 ## API
 
