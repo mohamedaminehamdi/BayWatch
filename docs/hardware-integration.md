@@ -114,6 +114,7 @@ The engine ([schedule.ts](../web/lib/schedule.ts)) calls the adapter ([ecurious.
 | A plate read in a bay with **nothing booked**, sensor vacant | Remembered for 2 min, with no event yet, so a car driving past doesn't mark the bay as taken |
 | Sensor: **vacant → occupied** | `plateEvent(bay, <read in the last 2 min, or '' = unreadable>)`. During a live booking with no read, the driver is offered "I'm at the bay" |
 | Sensor: **occupied → vacant**, still vacant after `ECURIOUS_VACANT_MS` (10 s) | `vacated(bay)`: the session completes (with any idle fee), a car without a booking is cleared, and the arm rises again. The wait means a sensor flicker never ends a session |
+| Arm lowered by the camera itself, with a car on the sensor and no readable plate | The booked car checks in **only if the camera's list is confirmed** to hold just this booking's plates (`listOk === true`). An unknown list (not read yet) or `['*']` proves nothing: the driver gets "I'm at the bay" instead |
 | Arm moved, heartbeat, alarm | Update the cached status |
 
 The engine also reads each lock's status every 5 s (cached): a vacant sensor clears a stale "car in the bay" (a missed event, a reconnect), and an occupied one with nobody checked in marks the bay taken.
@@ -136,6 +137,8 @@ The engine's tick and `/api/state`, `/api/bays` and `/api/operator` call `status
 { state: 'free' | 'blocked' | 'unknown', mock: false, lockId, name, online,
   carPresence: 'occupied' | 'vacant' | null,
   autoUnlock: 'any' | 'plates' | 'off' | null,  // 'any' = the camera lowers the arm for every car
+  listOk: boolean | null,                        // the list is what we last set, or empty if we set nothing (e.g. after a restart);
+                                                 // false: it differs, and the engine sets it again; null: not read yet
   battery12V, battery3_7V, signalStrength4G, waterIngress, activeErrors, lastSeenAt,
   events,                                        // the live stream is connected
   stale, error, updatedAt }

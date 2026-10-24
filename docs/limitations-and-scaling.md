@@ -17,7 +17,7 @@ _Last updated: 2026-10-24, booking v2. This is challenge deliverable 5._
 | **Reminders** | An in-app banner plus a browser notification, only while the app is open | Web Push through a service worker, or the native app |
 | **Free cancellations** | The 3-upcoming limit caps hoarding, but chained free 2-minute cancellations can still keep a bay held | A cap on free cancellations per driver and per partner, per hour |
 | **Credits** | Who funds the €5 blocked-bay credit (operator or platform) is undecided | Settle it in the CPO contract |
-| **Voice** | Demo payment only (`VOICE_DEMO=1`). Phone calls book for one demo account. | Real payment, and a caller lookup for phone calls |
+| **Voice** | Demo payment only (`VOICE_DEMO=1`). Phone calls carry no driver token and book for one demo account (`VOICE_DEMO_USER_ID`, unset by default), so anyone with the number could book, a "now" booking on a real lock included (flagged by the security review). | Before setting `VOICE_DEMO_USER_ID`: make phone calls quote-only, or let them book only simulated bays. Then a caller lookup and real payment |
 | **Flutter** | A port of the web screens, so a web change needs the same change in Dart. Google sign-in is only in the Next.js web app (email + password or a code works). No push notifications or deep links yet. Native builds not yet run. | Build on Android and iOS; Clerk OAuth with a deep-link redirect; push via FCM/APNs; share copy and rule numbers from one source |
 | **Accounts** | A temporary Clerk app (accountless dev keys) | Claim it (`npx clerk auth login`), then a production instance |
 | **Email alerts** | Resend's sandbox delivers only to the account's own address | Verify a sending domain |

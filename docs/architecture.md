@@ -77,13 +77,13 @@ flowchart LR
 
 | Concern | How it's handled |
 |---|---|
-| Who the driver is | Clerk session. Pages call `auth.protect()`, and routes return 401 when signed out. |
+| Who the driver is | Clerk session: the web's cookie, or the Flutter app's session JWT as `Authorization: Bearer`. Pages call `auth.protect()`, and routes return 401 when signed out. `GET /api/config` hands the app only `NEXT_PUBLIC_*` values. |
 | Whose booking | Owner checks on every booking route. Anyone else's booking is a 404. |
 | Payment | Decided on the server ([booking-api.ts](../web/lib/booking-api.ts)): the browser's `payment` field is ignored. The demo payment is allowed only without Stripe keys, or with `VOICE_DEMO=1` for voice. |
-| Opening an arm | A plate match (the camera's whitelist or our misread-tolerant match). The fallback check-in needs camera or sensor evidence in the last 3 min, plus 150 m. Walk-up on a real lock needs the camera to read **one of the driver's own plates**. Location alone never lowers an arm. |
+| Opening an arm | A plate match (the camera's whitelist or our misread-tolerant match). The fallback check-in needs camera or sensor evidence in the last 3 min, plus 150 m. Walk-up on a real lock needs the camera to read **one of the driver's own plates**. When the camera lowers the arm by itself for a plate we couldn't read, it counts as the booked car only while the camera's list is **confirmed** to hold just that booking's plates (`listOk === true`); an unknown or 'any car' list proves nothing, and the driver uses "I'm at the bay". Location alone never lowers an arm. |
 | Demo events | `SIMULATOR=1` routes are refused (403) on bays with a real lock. They only listen to their own camera and sensor. |
 | Hardware | Live only with the key and `ECURIOUS_LIVE=1` (`ECURIOUS_MOCK=1` is the kill switch). Only the team's locks, validated against `GET /locks`; `lock-0001` is never called. |
-| Voice | The Vapi webhook needs `VAPI_BEARER_SECRET`. The driver comes from a token signed with its own `VOICE_SESSION_SECRET`, never from the caller or the model. |
+| Voice | The Vapi webhook needs `VAPI_BEARER_SECRET`. The driver comes from a token signed with its own `VOICE_SESSION_SECRET`, never from the caller or the model. **Open:** phone calls carry no token and book as `VOICE_DEMO_USER_ID` when it's set (it isn't by default), so anyone with the number could book, a "now" booking included ([limitations](limitations-and-scaling.md)). |
 | Partners | `Authorization: Token`, constant-time and failing closed. 60 requests a minute. Partner URLs are never called. |
 | Camera webhook | `x-webhook-secret`, failing closed, and refused on real-lock bays |
 | Input and secrets | JSON bodies capped at 10 KB. Keys only in `web/.env*` (gitignored). |

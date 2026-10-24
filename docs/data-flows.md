@@ -56,7 +56,7 @@ sequenceDiagram
   E-->>D: arrived (fallback) · coordinates not stored
 ```
 
-A driver's location alone never lowers an arm.
+A driver's location alone never lowers an arm. If the camera lowered the arm by itself for a car whose plate we couldn't read, the engine checks the booking in only while the camera's list is confirmed to hold just that booking's plates; otherwise the driver gets "I'm at the bay".
 
 ## 3. Blocked bay → re-route + €5 credit
 
@@ -154,6 +154,28 @@ A partner sends `RESERVE_NOW` with `location_id` = bay id, the plate and consent
 
 The documented names were `status_change` and `vehicle_presence`. The live server sends the `_changed` forms, which the parser has handled since 2026-10-24 ([what-did-not-work](what-did-not-work.md)).
 
+## 10. The Flutter app: sign-in and API calls
+
+```mermaid
+sequenceDiagram
+  autonumber
+  actor D as Driver
+  participant A as Flutter app
+  participant S as Next.js server
+  participant C as Clerk
+  A->>S: GET /api/config
+  S-->>A: clerkPublishableKey, vapi (NEXT_PUBLIC_* only)
+  D->>A: email + password, or a code by email
+  A->>C: sign in (phones: clerk_auth native mode · web: clerk-js via web/clerk_bridge.js)
+  C-->>A: session (+ a code by email on a new device)
+  A->>C: session token (JWT, ~60 s, refreshed)
+  A->>S: GET /api/state, POST /api/reservations … with Authorization: Bearer <jwt>
+  S->>S: auth() verifies the JWT like the web's cookie
+  S-->>A: the same JSON as the web
+```
+
+The app shows exactly what the web does; there is no second backend. Clerk refuses a browser request that carries both `Origin` and `Authorization`, which is why the web build signs in through clerk-js.
+
 ## Personal data
 
 | Data | Stored where | Who sees it | Erased when |
@@ -165,5 +187,6 @@ The documented names were `status_change` and `vehicle_presence`. The live serve
 | Camera reads (walk-up evidence) | In memory, at most 3 min | Nobody | After 3 min |
 | Blocking car's plate | The alert, in memory | Operators only, never emailed | On resolve |
 | Locations (check-in, walk-up) | Not stored | – | Used once for the 150 m check |
+| The app's Clerk session (Flutter) | On the phone (shared_preferences), or in the browser's storage via clerk-js | The driver | On sign-out |
 | Voice calls | Vapi | – | Plates are never sent to the voice model |
 | Booking outcomes | In memory | The owner; operators as aggregates | On restart |

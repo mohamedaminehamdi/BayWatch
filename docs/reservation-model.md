@@ -15,7 +15,8 @@ _Last updated: 2026-10-24. **Booking v2 replaces** the earlier reserve-now rules
 | Class (by max power) | **slow** < 50 kW: up to 4 h, 0.5× · **fast** 50–299 kW: up to 2 h, 1× · **ultra** ≥ 300 kW: up to 1 h, 1.5× |
 | Reservation fee | **€5** (a standard, fast reservation) × class × demand, **never above €10**, fixed at booking |
 | Demand | By time and place: weekdays 17:00–19:00 **busy** 1.5×, 22:00–06:00 **quiet** 0.8×, `HOLIDAYS` busy, otherwise normal. The demo's "Site demand" overrides it (Peak 2×) |
-| Arrival grace | 15 min after the start, then it's a no-show |
+| "Book now" | One tap from the bay panel: the slot starts in the block under way (however far into it) and lasts at least an hour from now, up to the class maximum. The server sets the slot (`start=now`, `{now: true}`) |
+| Arrival grace | 15 min after the start, then it's a no-show. For a slot already under way, 15 min after booking |
 | No-show | **100%** of the fee |
 | Cancellation | Free within 2 min of booking, and ≥ 24 h ahead. Then **10%** (24 h – 30 min), **50%** (30 – 5 min), **80%** (< 5 min, until the arrival deadline). Free while the bay is blocked |
 | Overstay | **5 free minutes** after the end, then **€0.30/min**, at most €12. Split 50:50 between operator and platform |

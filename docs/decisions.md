@@ -338,3 +338,8 @@ Details and sources: [reservation-model.md](reservation-model.md).
 - **Why:** the team asked for Flutter and a native app, and a WebView shell would block Google sign-in and need extra permission plumbing anyway. A port keeps the app native at the cost of keeping two UIs in step.
 - **Consequence:** supersedes D4. Every web UI change needs the same change in `mobile/`. Google sign-in, push notifications and deep links stay in the Next.js web app for now ([limitations](limitations-and-scaling.md)).
 
+### D50. The camera's own check-in counts only with a confirmed plate list
+- **Decision:** when the camera lowers the arm by itself and a car is on the sensor but no plate was read, the engine checks the booking in only if the camera's allow-list is confirmed to be exactly the booking's plates (`listOk === true`). An unknown list counts as empty (nothing set yet, for example after a restart), so a list that differs is set again.
+- **Why:** an automated security review found the old rule failed open. It refused only a list known to be wrong, so with an unknown or "any car" list, a stranger's car could check in a booked driver.
+- **Consequence:** in doubt, the driver taps "I'm at the bay" (camera or sensor evidence plus 150 m), as for an unreadable plate. See [hardware-integration.md](hardware-integration.md#events--the-engine).
+
