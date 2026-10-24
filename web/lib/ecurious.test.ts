@@ -93,7 +93,7 @@ test('status: the real fields, no plates, and one hardware read for many polls',
     online: true,
     carPresence: 'vacant',
     autoUnlock: 'any',
-    listOk: null,
+    listOk: false, // ['*'] while nothing is booked: any car would lower the arm
     battery12V: 15.1,
     battery3_7V: 0,
     signalStrength4G: 0,

@@ -66,7 +66,8 @@ export interface Hardware {
   raise(lockId: string, plates: string[]): Promise<{ autoUnlock: 'camera' | 'app' } | void>; // 'camera': it took the plates
   lower(lockId: string): Promise<unknown>; // and empties the camera's list
   setPlates(lockId: string, plates: string[]): Promise<boolean | void>; // the camera's own allow-list, while armed
-  // listOk: the camera's allow-list is exactly what was last set (false: it changed, e.g. back to ['*']; null: unknown)
+  // listOk: the camera's allow-list is exactly what was last set, or empty if nothing was (false: it differs, e.g.
+  // ['*'] = any car; null: not read yet)
   status(lockId: string): Promise<{ state: string; mock: boolean; online?: boolean; carPresence?: 'occupied' | 'vacant' | null; listOk?: boolean | null }>;
 }
 
@@ -918,11 +919,12 @@ export function createSchedule({
     if (b) b.autoUnlock = ok ? 'camera' : 'app';
   }
 
-  // A held booking whose plate the camera couldn't read, yet the camera let the car in by itself (its allow-list
-  // holds only this booking's plates): the arm is down and a car is on the sensor, so that's the booked car
+  // A held booking whose plate the camera couldn't read, yet the camera let the car in by itself: the arm is down and
+  // a car is on the sensor. That's the booked car only while the list is known to hold just this booking's plates
+  // (listOk true): a list that's unknown, or 'any' car, proves nothing, and the driver has "I'm at the bay".
   async function letIn(b: Booking, s: { state: string; carPresence?: string | null; listOk?: boolean | null }) {
     if (!b.armed || b.autoUnlock !== 'camera' || b.blockedSince !== null || inBay(b.bayId)) return false;
-    if (s.state !== 'free' || s.carPresence !== 'occupied' || s.listOk === false) return false;
+    if (s.state !== 'free' || s.carPresence !== 'occupied' || s.listOk !== true) return false;
     await checkIn(b, 'camera', undefined, 'barrier let the car in');
     return true;
   }

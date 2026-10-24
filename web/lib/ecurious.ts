@@ -42,7 +42,7 @@ export type HardwareStatus = {
   online?: boolean;
   carPresence?: 'occupied' | 'vacant' | null;
   autoUnlock?: 'any' | 'plates' | 'off' | null; // whom the camera lowers the arm for: 'any' = the hold isn't enforced
-  listOk?: boolean | null; // the camera's list is exactly what setPlates last set (false: it changed); null: unknown
+  listOk?: boolean | null; // the camera's list is what setPlates last set, or empty if nothing was (false: it differs); null: not read
   battery12V?: number | null;
   battery3_7V?: number | null;
   signalStrength4G?: number | null;
@@ -177,7 +177,7 @@ function view(id: string, c: LockCache): HardwareStatus {
     online: !!l && l.status !== 'offline',
     carPresence: l?.carPresence === 'occupied' || l?.carPresence === 'vacant' ? l.carPresence : null,
     autoUnlock: !wl ? null : wl.includes('*') ? 'any' : wl.length ? 'plates' : 'off',
-    listOk: wl && c.wanted ? sameList(wl, c.wanted) : null,
+    listOk: wl ? sameList(wl, c.wanted ?? []) : null, // nothing set yet (e.g. after a restart): no plate, the app decides walk-ups
     battery12V: l?.battery12V ?? null,
     battery3_7V: l?.battery3_7V ?? null,
     signalStrength4G: l?.signalStrength4G ?? null,

@@ -21,7 +21,7 @@ function setup(wallets: Record<string, Partial<Wallet>> = {}) {
   let t = at('10:02');
   const calls: string[] = [];
   // camera: the lock echoes the plates (its own list lets the booked car in); arm: what status reads
-  const state = { carOverArm: false, presence: 'vacant' as 'vacant' | 'occupied', camera: false, arm: 'blocked' };
+  const state = { carOverArm: false, presence: 'vacant' as 'vacant' | 'occupied', camera: false, arm: 'blocked', listOk: undefined as boolean | null | undefined };
   const hw: Hardware = {
     raise: async (lock, plates) => {
       calls.push(`raise ${lock} [${plates.join(',')}]`);
@@ -37,7 +37,7 @@ function setup(wallets: Record<string, Partial<Wallet>> = {}) {
       calls.push(`plates ${lock} [${plates.join(',')}]`);
       return state.camera;
     },
-    status: async () => ({ state: state.arm, mock: false, online: true, carPresence: state.presence }),
+    status: async () => ({ state: state.arm, mock: false, online: true, carPresence: state.presence, listOk: state.listOk }),
   };
   const saved: Record<string, Wallet> = {};
   const store = {
@@ -382,6 +382,22 @@ test('the camera’s plate list: on at hold start; when the camera lowers the ar
   setNow(at('15:52'));
   await s.cancel(ANNA, third.id);
   assert.equal(calls.at(-1), 'plates lock-0002 []', 'cancelled: the plate comes off the list');
+});
+
+test('the camera let the car in by itself: a check-in only while its list is known to hold just the booked plate', async () => {
+  const { s, book, advance, setNow, state } = setup();
+  state.camera = true;
+  const b = await book(ANNA, 'bw-1', at('11:00'));
+  setNow(at('10:50'));
+  await advance(0); // the arm rises, with the booked plate on the camera's list
+  Object.assign(state, { arm: 'free', presence: 'occupied', listOk: null }); // the arm is down, a car is on the sensor
+  assert.deepEqual(await s.plateEvent('bw-1', ''), { matched: false }, 'its plate unreadable, and the list unknown: not proof');
+  state.listOk = false; // back to ['*']: any car could have lowered it
+  await advance(5_000);
+  assert.notEqual(s.get(ANNA, b.id).status, 'arrived');
+  state.listOk = true;
+  await advance(5_000);
+  assert.deepEqual([s.get(ANNA, b.id).status, s.get(ANNA, b.id).checkInMethod], ['arrived', 'camera']);
 });
 
 test('a car in the bay right now: a slot starting within 10 min can’t be booked, later ones can', async () => {
