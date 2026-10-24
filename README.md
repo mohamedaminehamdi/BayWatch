@@ -13,13 +13,19 @@ At a Baywatch bay, a real Ecurious lock keeps the bay free until you arrive, and
 Operators get blocked-bay alerts and a dashboard, and other charging apps can book through our OCPI-style API.
 </p>
 
+
 <p align="center">
-  <a href="baywatch_demo_90s.mp4"><strong>▶ Watch the 90-second demo</strong></a>
+  <a href="baywatch_demo_90s.mp4" style="color: #A78BFA;"><strong>▶ Watch the 90-second demo</strong></a>
   &nbsp;·&nbsp;
-  <a href="https://app.notion.com/p/BayWatch-4032e6d9e3bb8033b730de17ef7f7b33?source=copy_link">Project board</a>
+  <a href="https://app.notion.com/p/BayWatch-4032e6d9e3bb8033b730de17ef7f7b33?source=copy_link" style="color: #A78BFA;">Project board</a>
   &nbsp;·&nbsp;
+  <a href="docs/BayWatch — Ecurious Challenge Pitch.pptx" style="color: #A78BFA;">Project Presentation</a>
+</p>
+
+<p align="center">
   Built for the Ecurious challenge at Watt the Hack
 </p>
+
 
 <p align="center">
   <img src="docs/screenshots/app-explore.png" alt="Explore: the three Baywatch bays in violet and every GoingElectric charger on the map, each with Book now" width="100%">
