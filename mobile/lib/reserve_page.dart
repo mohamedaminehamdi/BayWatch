@@ -158,8 +158,12 @@ class _ReservePageState extends State<ReservePage> {
             ),
             children: [
               TileLayer(
-                urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+                urlTemplate: 'https://api.maptiler.com/maps/streets-v2/256/{z}/{x}/{y}.png?key=irAhmpZT2WsOW6tsnZl3',
+                additionalOptions: const {
+                  'apiKey': 'irAhmpZT2WsOW6tsnZl3',
+                },
                 userAgentPackageName: 'io.ecurious.ecurious_reserve',
+                maxZoom: 19,
               ),
               MarkerLayer(
                 markers: [
