@@ -1,18 +1,23 @@
-// Partner API: other charging apps (eMSPs) reserve the Ecurious bay for their own drivers.
-// OCPI 2.2.1-style RESERVE_NOW / CANCEL_RESERVATION, answered synchronously in the OCPI envelope, plus a
-// status endpoint to poll. The partner passes the driver's plate (with the driver's consent), so the camera
-// checks that car in like any other booking. Guide: docs/api.md · spec: public/openapi.json.
+// Partner API: other charging apps (eMSPs) book Baywatch bays, and any GoingElectric charger, for their own
+// drivers. OCPI 2.2.1-style RESERVE_NOW / CANCEL_RESERVATION, answered synchronously in the OCPI envelope, plus a
+// status endpoint to poll. location_id is the bay id (bw-1 … or ge-<id>); the slot sits on the 15-min grid. The
+// partner passes the driver's plate (with the driver's consent), so the camera checks that car in like any other
+// booking. Guide: docs/api.md · spec: public/openapi.json.
 // No Next.js imports, so `node --test lib/partners.test.ts` runs it as it is.
 
 import { createHash, timingSafeEqual } from 'node:crypto';
+import { CLASSES, earliestStart } from './booking-rules.ts';
+import type { ReservationView } from './booking-types.ts';
+import type { BayInfo } from './bays.ts';
 import { formatEuro } from './pricing.ts';
-import type { createReservations, ReservationView } from './reservation.ts';
+import type { Schedule } from './schedule.ts';
 
-// OCPI location_id of the bay. One guarded bay (one EVSE) per location today; with more bays, evse_uid picks one.
-export const bayId = process.env.BAY_ID ?? 'ECU-TEST-1';
-export const evseUid = `${bayId}-1`;
+// The bay the old single-bay pages link to (deprecated: every bay id is a location_id now)
+export const bayId = 'bw-1';
+export const evseOf = (id: string) => `${id}-1`; // one guarded bay (one EVSE) per location today
+export const evseUid = evseOf(bayId);
 
-// The deep link for "Reserve with Ecurious" buttons: the bay in the app, with the reserve dialog open
+// The deep link for "Book with Baywatch" buttons: the bay in the app, with the booking dialog open
 export const reserveLink = (id = bayId) => `/explore?bay=${encodeURIComponent(id)}&reserve=1`;
 
 export type Partner = { name: string; token: string };
@@ -96,14 +101,28 @@ export const commandResponse = (result: 'ACCEPTED' | 'REJECTED' | 'NOT_SUPPORTED
   ...extra,
 });
 
-// Thrown errors as OCPI answers. A refusal (bay taken, unknown id, price moved) is a normal REJECTED;
-// a malformed request is 400/413; our own failures are 5xx with a generic message, and logged here.
+// A 502 comes from the bay's hardware. If it said no for a reason (a car over the arm, the bay offline, a
+// command that just failed), that reason is the answer; if it didn't answer (a timeout, a dropped connection),
+// null: the caller sends a generic text. Our REST paths, the API key and device serials stay on the server,
+// and the engine's hardware messages never carry plates.
+const NO_ANSWER = /no answer in \d+ s|\b(ECONNREFUSED|ECONNRESET|ENOTFOUND|ETIMEDOUT|EHOSTUNREACH|ENETUNREACH|EAI_AGAIN|UND_ERR_\w+)\b|fetch failed/;
+function hardwareReason(text: string) {
+  if (NO_ANSWER.test(text)) return null;
+  const key = process.env.ECURIOUS_API_KEY;
+  return (key ? text.split(key).join('[key]') : text).replace(/\b(GET|POST) \/\S+: /g, '').replace(/\b[0-9a-f]{12,}\b/gi, '[serial]');
+}
+
+// Thrown errors as OCPI answers. A refusal (bay taken, unknown id, price moved, the hardware saying no) is a
+// normal REJECTED with its reason; a malformed request is 400/413; our own failures and hardware that doesn't
+// answer are 5xx with a generic message, and logged here.
 export function commandError(e: unknown): Reply {
   const status = (e as { status?: unknown } | null)?.status;
   const text = e instanceof Error ? e.message : String(e);
   if (status === 400 || status === 413) return { status, body: envelope(commandResponse('REJECTED', text), 2001, 'Invalid or missing parameters') };
   if (typeof status === 'number' && status < 500) return { status: 200, body: envelope(commandResponse('REJECTED', text)) };
   console.error('Partner command failed:', e);
+  const reason = status === 502 ? hardwareReason(text) : null;
+  if (reason) return { status: 200, body: envelope(commandResponse('REJECTED', reason)) };
   const hw = status === 502;
   return {
     status: hw ? 502 : 500,
@@ -121,7 +140,7 @@ const isObject = (v: unknown): v is Record<string, unknown> => typeof v === 'obj
 const sameId = (a: string, b: string) => a.toUpperCase() === b.toUpperCase(); // OCPI CiString: case-insensitive
 const iso = (t: number) => new Date(t).toISOString();
 const TOKEN_TYPES = ['AD_HOC_USER', 'APP_USER', 'OTHER', 'RFID'];
-const LIVE = ['reserved', 'arrived', 'charging'];
+const LIVE = ['upcoming', 'live', 'arrived', 'charging'];
 
 // OCPI CiString(36): printable ASCII. Spaces aren't allowed in ids here.
 function ciString(v: unknown, field: string): string {
@@ -153,38 +172,50 @@ function reserveInput(b: unknown, now: number) {
   const plate = b.ecurious_license_plate;
   if (typeof plate !== 'string' || plate.length > 20) fail(400, 'ecurious_license_plate is required: the plate the camera will read');
   if (b.ecurious_plate_consent !== true) fail(400, 'ecurious_plate_consent must be true: the driver agreed to plate recognition for this booking');
-  const minutes = b.ecurious_session_minutes;
-  if (typeof minutes !== 'number' || !Number.isInteger(minutes) || minutes < 1 || minutes > 24 * 60) fail(400, 'ecurious_session_minutes must be a whole number of minutes');
+  if (b.ecurious_session_minutes !== undefined) fail(400, 'ecurious_session_minutes was replaced by ecurious_blocks: the length in 15-minute blocks');
+  const start = b.ecurious_start;
+  if (start !== undefined && (typeof start !== 'number' || !Number.isInteger(start))) fail(400, 'ecurious_start must be a start time in ms, on the quarter hour');
+  const blocks = b.ecurious_blocks;
+  if (blocks !== undefined && (typeof blocks !== 'number' || !Number.isInteger(blocks))) fail(400, 'ecurious_blocks must be a whole number of 15-minute blocks');
   const fee = b.ecurious_fee_cents;
-  if (typeof fee !== 'number' || !Number.isInteger(fee) || fee < 0) fail(400, 'ecurious_fee_cents must be the fee the driver accepted, in cents (quote.cents from GET /api/state)');
+  if (typeof fee !== 'number' || !Number.isInteger(fee) || fee < 0) fail(400, 'ecurious_fee_cents must be the fee the driver accepted, in cents (cents from GET /api/bays/{location_id}/quote)');
   // the request is well-formed; from here on a "no" is a REJECTED
-  if (!sameId(location, bayId)) fail(404, `Unknown location_id. This server has ${bayId}.`);
-  if (evse !== undefined && !sameId(evse, evseUid)) fail(404, `Unknown evse_uid. Location ${bayId} has ${evseUid}.`);
   if (t.valid === false) fail(403, 'The token is not valid');
   if (expiry <= now) fail(409, 'expiry_date has already passed');
-  return { uid, reservationId, plate, minutes, fee };
+  return { uid, reservationId, location, evse, plate, start: start as number | undefined, blocks: blocks as number | undefined, fee };
 }
 
 // ── Reservations ──────────────────────────────────────────────────────────────────────────────────
 
-type Reservations = Pick<ReturnType<typeof createReservations>, 'reserve' | 'cancel' | 'state' | 'bookings'>;
+type Engine = Pick<Schedule, 'reserve' | 'cancel' | 'get' | 'bay' | 'bayView'>;
 
-// The one adapter between partners and reservation.ts, whose API teammates are still changing: every call
-// to it goes through here. `links` maps a partner's reservation_id to our reservation.
-export function partnerBay(r: Reservations, links: Map<string, Link> = (g.ecuriousPartnerLinks ??= new Map())) {
+// The one adapter between partners and the booking engine (schedule.ts): every call to it goes through here.
+// `links` maps a partner's reservation_id to our booking. `resolve` finds a bay by id, GoingElectric included.
+export function partnerBay(
+  r: Engine,
+  links: Map<string, Link> = (g.ecuriousPartnerLinks ??= new Map()),
+  resolve: (id: string) => Promise<BayInfo | null> = async (id) => r.bay(id),
+) {
   return {
     links,
-    reserve: (ownerId: string, plate: string, label: string, minutes: number, feeCents: number) =>
-      r.reserve(ownerId, plate, label, minutes * 60_000, feeCents),
-    cancel: (ownerId: string) => r.cancel(ownerId),
-    // a reservation, current or ended, as its owner sees it
-    find: (ownerId: string, id: string): ReservationView | null =>
-      [r.state(ownerId).reservation, ...r.bookings(ownerId)].find((v) => v?.id === id) ?? null,
-    // what anyone may know: is the bay free, and what does it cost right now
-    availability: () => {
-      const s = r.state(null);
-      const status = s.blockedSince ? 'occupied' : s.reservation ? (s.reservation.status === 'reserved' ? 'reserved' : 'in_use') : s.priority ? 'held' : 'free';
-      return { status: status as 'free' | 'reserved' | 'in_use' | 'occupied' | 'held', feeCents: s.quote.cents, demand: s.quote.demand };
+    resolve,
+    reserve: (ownerId: string, partner: string, input: { bayId: string; start: number; blocks: number; plate: string; feeCents: number }) =>
+      r.reserve(ownerId, { ...input, vehicleLabel: `Booked via ${partner}`, expectedCents: input.feeCents, partner }),
+    cancel: (ownerId: string, id: string) => r.cancel(ownerId, id),
+    // a booking, current or ended, as its owner sees it
+    find: (ownerId: string, id: string): ReservationView | null => {
+      try {
+        return r.get(ownerId, id);
+      } catch {
+        return null;
+      }
+    },
+    // what anyone may know: is the bay free, and what does booking it cost from now
+    availability: (id = bayId) => {
+      const info = r.bay(id);
+      const v = info && r.bayView(info);
+      const status = !v ? 'occupied' : v.status === 'free' ? 'free' : v.status === 'reserved' ? 'reserved' : v.status === 'offline' ? 'occupied' : 'in_use';
+      return { status: status as 'free' | 'reserved' | 'in_use' | 'occupied' | 'held', feeCents: v?.priceFromCents ?? 0, demand: 'Quiet' };
     },
   };
 }
@@ -194,7 +225,7 @@ const LINKS_CAP = 500;
 const linkKey = (partner: string, reservationId: string) => `${partner}\n${reservationId.toUpperCase()}`;
 
 const accepted = (v: ReservationView, text: string) =>
-  commandResponse('ACCEPTED', text, { ecurious_arrive_by: iso(v.expiresAt), ecurious_fee_cents: v.feeCents ?? null });
+  commandResponse('ACCEPTED', text, { ecurious_start: v.start, ecurious_end: v.end, ecurious_arrive_by: iso(v.arriveBy), ecurious_fee_cents: v.feeCents });
 
 async function reserveNow(partner: string, input: unknown, bay: PartnerBay) {
   const req = reserveInput(input, Date.now());
@@ -204,17 +235,22 @@ async function reserveNow(partner: string, input: unknown, bay: PartnerBay) {
     // a retry after a lost answer: same result, nothing changes (OCPI's "replace" isn't supported)
     const v = bay.find(known.ownerId, known.id);
     if (!v || !LIVE.includes(v.status)) fail(409, 'This reservation_id was already used. Send a new one.');
-    return accepted(v, `Already reserved under this reservation_id; nothing was changed. Arrive by ${iso(v.expiresAt)}.`);
+    return accepted(v, `Already booked under this reservation_id; nothing was changed. Arrive by ${iso(v.arriveBy)}.`);
   }
+  const info = await bay.resolve(req.location.toLowerCase()); // OCPI ids are case-insensitive; ours are lowercase
+  if (!info) fail(404, 'Unknown location_id: use a Baywatch bay (bw-1, bw-2, bw-3) or a GoingElectric charger (ge-<id>)');
+  if (req.evse !== undefined && !sameId(req.evse, evseOf(info.id))) fail(404, `Unknown evse_uid. Location ${info.id} has ${evseOf(info.id)}.`);
+  const start = req.start ?? earliestStart(Date.now());
+  const blocks = req.blocks ?? CLASSES[info.class].maxBlocks;
   const ownerId = `partner:${partner}:${req.uid.toUpperCase()}`;
-  const v = await bay.reserve(ownerId, req.plate, `Booked via ${partner}`, req.minutes, req.fee);
+  const v = await bay.reserve(ownerId, partner, { bayId: info.id, start, blocks, plate: req.plate, feeCents: req.fee });
   bay.links.set(key, { reservationId: req.reservationId, ownerId, id: v.id });
-  // ponytail: in memory like the reservations, oldest link dropped past the cap. A table once there's a DB.
+  // ponytail: in memory like the bookings, oldest link dropped past the cap. A table once there's a DB.
   if (bay.links.size > LINKS_CAP) bay.links.delete(bay.links.keys().next().value!);
-  return accepted(v, `Reserved. Arrive by ${iso(v.expiresAt)}: the camera checks the car in by its plate.`);
+  return accepted(v, `Booked. Arrive by ${iso(v.arriveBy)}: the camera checks the car in by its plate.`);
 }
 
-// A partner can only cancel its own reservations: the lookup is keyed by partner
+// A partner can only cancel its own bookings: the lookup is keyed by partner
 async function cancelReservation(partner: string, input: unknown, bay: PartnerBay) {
   if (!isObject(input)) fail(400, 'Send a CancelReservation JSON object');
   checkResponseUrl(input.response_url);
@@ -222,9 +258,9 @@ async function cancelReservation(partner: string, input: unknown, bay: PartnerBa
   const v = known && bay.find(known.ownerId, known.id);
   if (!known || !v) fail(404, 'Unknown reservation_id');
   if (v.status === 'arrived' || v.status === 'charging') fail(409, 'The driver has already checked in. The session ends when the car leaves.');
-  if (v.status !== 'reserved') fail(409, `This reservation has already ended (${v.status.toUpperCase()})`);
-  const after = await bay.cancel(known.ownerId);
-  const fee = after.totalCents ?? 0;
+  if (v.status !== 'upcoming' && v.status !== 'live') fail(409, `This reservation has already ended (${v.status.toUpperCase()})`);
+  const after = await bay.cancel(known.ownerId, known.id);
+  const fee = after.totalCents;
   return commandResponse('ACCEPTED', `Cancelled, the bay is free again. ${fee ? `Cancellation fee: ${formatEuro(fee)}.` : 'No fee.'}`, {
     ecurious_fee_cents: fee,
   });
@@ -251,21 +287,21 @@ export function reservationStatus(partner: string, reservationId: string, bay: P
     status: 200,
     body: envelope({
       reservation_id: known.reservationId,
-      location_id: bayId,
-      evse_uid: evseUid,
-      status: v.status.toUpperCase(), // RESERVED → ARRIVED → CHARGING → COMPLETED, or CANCELLED / NO_SHOW
-      arrive_by: iso(v.expiresAt), // the hold: moves while another car blocks the bay, and with an extension
+      location_id: v.bayId,
+      evse_uid: evseOf(v.bayId),
+      status: v.status.toUpperCase(), // UPCOMING → LIVE → ARRIVED → CHARGING → COMPLETED, or CANCELLED / NO_SHOW
+      session_start: iso(v.start),
       session_end: iso(v.end),
-      bay_blocked: v.blockedSince != null, // another car is in the bay: the hold is paused, cancelling is free
-      license_plate_hint: v.plateHint ?? null, // masked; the plate itself is erased when the reservation ends
+      arrive_by: iso(v.arriveBy), // start + 15 min, moved on while another car blocks the bay
+      bay_blocked: v.blockedSince != null, // another car is in the bay: the deadline waits, cancelling is free
+      license_plate_hint: v.plateHint ?? null, // masked; the plate itself is erased when the booking ends
       checked_in_at: v.arrivedAt ? iso(v.arrivedAt) : null,
       ended_at: v.endedAt ? iso(v.endedAt) : null,
       fees: {
         currency: 'EUR',
-        reservation_cents: v.feeCents ?? null,
-        prepaid: v.prepaid ?? false,
-        total_cents: v.totalCents ?? 0, // what this booking costs so far, refunds included
-        lines: (v.charges ?? []).map(({ label, cents }) => ({ label, cents })),
+        reservation_cents: v.feeCents,
+        total_cents: v.totalCents, // what this booking costs so far, refunds and idle fees included
+        lines: v.charges.map(({ label, cents }) => ({ label, cents })),
       },
     }),
   };

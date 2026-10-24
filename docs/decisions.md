@@ -22,7 +22,7 @@ Each entry gives the decision, why we made it, and what follows from it.
 ### D4. Flutter in Chrome only
 - **Decision:** the Flutter app runs as Flutter web. The iOS and Android projects are generated but not built.
 - **Why:** Xcode wasn't the active developer tool and there was no Android SDK. The team chose Chrome over installing either.
-- **Consequence:** Flutter lags the web app. It can't reserve since D7 ([limitations](limitations-and-scaling.md)).
+- **Consequence:** Flutter lagged the web app and couldn't reserve after D7. Superseded by D49.
 
 ### D5. Camera events through a fail-closed webhook; the simulator on its own route
 - **Decision:** `POST /api/plate-events` requires `WEBHOOK_SECRET` (constant-time compare) and rejects everything when it's unset. Demo plate events go to `/api/sim/plate-events`, which only exists with `SIMULATOR=1`.
@@ -39,7 +39,7 @@ Each entry gives the decision, why we made it, and what follows from it.
 - **Why:** the team wanted a real login flow (landing → sign in → app). Accountless mode needed no account to start.
 - **Consequence:**
   - The Clerk app is temporary until claimed (`npx clerk auth login`).
-  - Flutter needs Clerk before it can reserve again.
+  - Flutter needed Clerk before it could reserve again (done in D49).
   - Pages are protected per resource (`auth.protect()` in the `(app)` layout, `auth()` in routes), because `createRouteMatcher` is deprecated.
 
 ### D8. Drivers' cars in Clerk private metadata, no database
@@ -76,7 +76,7 @@ Each entry gives the decision, why we made it, and what follows from it.
 - **Why:** the team chose "Ecurious green". The design skill banned the first font pick (Plus Jakarta Sans).
 - **Consequence:** superseded by D15. Components use theme tokens only, so a retheme is mostly one file.
 
-### D15. Visual identity, second pass: the real Ecurious brand (in progress)
+### D15. Visual identity, second pass: the real Ecurious brand
 - **Decision:** retheme to the system on ecurious.com, documented in [web/DESIGN.md](../web/DESIGN.md):
   - paper `#F5F4F1` and ink `#0F1419`;
   - voltage lime `#C8E847`, only as a fill with ink on it;
@@ -87,7 +87,9 @@ Each entry gives the decision, why we made it, and what follows from it.
 - **Constraints:**
   - Every colour pairing was checked for WCAG AA with a script.
   - The Ecurious wordmark isn't used until Ecurious staff give permission; until then it's a text-only "Powered by Ecurious".
-- **Status:** in progress. Phase 2a is the shared UI. Phase 2b, Explore and booking, follows the fee wiring.
+- **Status:** built.
+  - First the shared UI, then Explore and booking.
+  - Then the leftovers: an offline map pin, the bay page buttons "Reserve this bay" and "Open in the app", the end time in the header pill, and the unused `--color-dc` token removed.
 - **Finding:** ecurious.com presents Ecurious as a smart-charging marketplace ("one card, every charger, best price", launching Sept 2026, Munich), and the reservation hardware isn't on the site. So we position reservations as a feature of the Ecurious app and card.
 
 ### D16. Mock payments; the charges list is the receipt
@@ -118,6 +120,7 @@ Each entry gives the decision, why we made it, and what follows from it.
 ### D21. Fallback check-in by location
 - **Decision:** "I'm at the bay" within 150 m. The coordinates are never stored.
 - **Why:** it handles unreadable plates now. It's spoofable, so on site we'd prefer a code on the hardware display or a QR sticker.
+- **Consequence:** superseded by D31, because location alone was enough to open the bay.
 
 ### D22. Reservation and pricing model, the team's decisions
 Details and sources: [reservation-model.md](reservation-model.md).
@@ -129,20 +132,32 @@ Details and sources: [reservation-model.md](reservation-model.md).
   - Tiers are **shares of the no-show fee**, so cancelling always costs less than not turning up.
   - **Free 24 h or more ahead.**
   - Free within 2 min of booking, or while the bay is blocked.
-- **Repeat no-shows:** **3 no-shows in the last 10 bookings (90 days)** means prepaying, with a warning at 2.
+- **Repeat no-shows:** **3 no-shows in the last 10 bookings (90 days)** means prepaying, with a warning at 2. Every prototype booking is already paid up front, so "prepaying" means the 50% no-show refund is withheld.
+- **The price shown is the price paid:** the fee is fixed at booking. If demand moves it before the driver pays, the booking is refused with the new price (409), and the driver confirms again.
 - **Arrival and overstay:** 15 min arrival grace. 15 min overstay grace, then €0.25/min (fast) or €0.10/min (slow), capped at €12.
 - **Operators:** the CPO plan "Bay Guard" is €19 per bay per month, and the CPO keeps 70% of reservation fees.
-- **Removed:** the earlier "+€5 on a second no-show" was dropped.
+- **Removed:**
+  - the earlier "+€5 on a second no-show" and its 30-day window;
+  - the old arrival reminder before the hold ended.
 
 ### D23. "Reserve now" only; advance booking is planned
 - **Decision:** the session starts when the driver books. Fixed-time advance slots are pitch-only.
 - **Why:** advance booking needs a slot schedule with overlap checks, pre-start reminders and a decision on device lock timing. That's too much for under a day.
 - **Consequence:** after the free 2 minutes, every cancellation falls in the 60% tier, so the cheaper tiers are unreachable today.
+- **Session lengths:**
+  - Fast bays offer 30 min, 1 h, 1 h 30 and 2 h. Slow bays offer 1 to 4 h. The default is 1 h.
+  - `SIMULATOR=1` adds a 16-minute demo length, so the 15-minute reminder shows a minute after check-in.
 
-### D24. Partner API: OCPI-style commands, no callbacks (in progress)
-- **Decision:** `RESERVE_NOW` / `CANCEL_RESERVATION` with partner tokens, plus an `ecurious_license_plate` extension so the camera recognises another app's driver. Partners poll a status endpoint.
-- **Why:** OCPI is how operators and service providers already talk. Calling partner-supplied `response_url`s would be an SSRF risk.
-- **Consequence:** see [api.md](api.md). The user asked that the API always be documented for other apps.
+### D24. Partner API: OCPI-style commands (built)
+- **Decision:**
+  - OCPI 2.2.1-style `RESERVE_NOW` / `CANCEL_RESERVATION` for partner apps (eMSPs), with hand-issued partner tokens.
+  - Four required extensions: `ecurious_license_plate`, `ecurious_plate_consent`, `ecurious_session_minutes` and `ecurious_fee_cents`.
+  - A public bay page `/bay/{id}` with link previews, a deep link `/explore?bay=…&reserve=1`, and an OpenAPI 3.1 spec at `/openapi.json`.
+- **Why:**
+  - OCPI is how operators and service providers already talk.
+  - The plate lets the camera recognise another app's driver, with no Ecurious account.
+  - The fee field makes the partner confirm the price its driver saw, as the app does. A moved price is REJECTED with the new one.
+- **Consequence:** the details are D26–D30 and [api.md](api.md). The user asked that the API always be documented for other apps.
 
 ### D25. Built by several AI agents with file ownership
 - **Decision:** separate background agents, each owning its own files to avoid edit conflicts:
@@ -150,6 +165,181 @@ Details and sources: [reservation-model.md](reservation-model.md).
   - pricing research (rules + doc);
   - brand (DESIGN.md, then the retheme);
   - interop (partner API + api.md);
+  - hardware (the Ecurious client, bridge, CLI + hardware-integration.md);
   - docs (this folder + README).
 - **Why:** less than a day, with parallel work.
 - **Consequence:** some docs describe features as "being wired" while agents finish them.
+
+### D26. Partners poll; we never call partner URLs
+- **Decision:** every CommandResponse is final (`timeout: 0`), with no `CommandResult` callback. Partners poll `GET /api/partner/v1/reservations/{id}`, and `response_url` is validated but never called.
+- **Why:** calling URLs a partner supplies invites server-side request forgery (SSRF): our server could be made to reach internal networks. Our answer is synchronous anyway.
+- **Consequence:** a deliberate deviation from OCPI 2.2.1. Callbacks could come later, but only to hosts a partner registers in the OCPI Credentials handshake ([api.md](api.md#roaming-outlook)).
+
+### D27. Partner bookings are owned per driver token
+- **Decision:** a partner booking's owner is `partner:<name>:<token uid>`.
+- **Why:** the no-show fee and the prepay rule must follow the driver, not the whole partner app. One unreliable driver shouldn't put every driver of that app on prepay.
+- **Consequence:** the reliability rule works for drivers without an Ecurious account. The uid is kept with the booking outcome and never returned.
+
+### D28. A repeated `reservation_id` is an idempotent retry
+- **Decision:** the same `reservation_id` again returns the same ACCEPTED answer and changes nothing. OCPI's "replace" isn't supported: to change a booking, cancel it and book again.
+- **Why:** answers get lost on mobile networks, and a retry must never double-book.
+- **Consequence:** reusing an id after its booking ended is REJECTED. The id links are kept in memory, up to 500.
+
+### D29. 60 requests a minute per partner
+- **Decision:** a fixed one-minute window per partner, counting commands and polls together. Past it, the answer is 429 with `Retry-After`.
+- **Why:** polling invites tight loops, and one partner mustn't slow the bay down for everyone.
+- **Consequence:** the window is in memory, for one process. It moves to an API gateway or Redis once there are more instances.
+
+### D30. Partner tokens plain or Base64
+- **Decision:** `Authorization: Token <token>` matches whether the token is sent as is or Base64-encoded. Both forms are compared as SHA-256 digests with `timingSafeEqual`, against every configured entry.
+- **Why:** OCPI 2.2.1 Base64-encodes the token, but many OCPI 2.1/2.2 clients send it plain.
+- **Consequence:** equal-length digests keep the check constant-time. No configured token means 401 for everyone: it fails closed.
+
+### D31. The fallback check-in needs evidence from the bay
+- **Decision:** "I'm at the bay" only works when the bay itself saw a car in the last 3 minutes, and the driver is within 150 m. The evidence is an unreadable plate read, or the presence sensor once it's wired. The button only appears then.
+- **Why:** a security review of the pushed commit found that the client's reported location alone could lower the arm, and coordinates are easy to fake from anywhere.
+- **Consequence:** location is now only an extra check. If the camera hasn't seen the car, the driver drives up to the guard or asks the operator. This supersedes D21.
+
+### D32. Real hardware is opt-in; the mock is the default
+- **Decision:**
+  - Live mode needs `ECURIOUS_API_KEY` **and** `ECURIOUS_LIVE=1`, and `ECURIOUS_MOCK=1` always forces the mock.
+  - The adapter only touches bays that our key lists, and refuses any other `ECURIOUS_LOCK_ID`.
+- **Why:**
+  - The key sits in `web/.env`, and the dev server reloads `lib/` on save. Without the gate, any dev session or automated UI test could move the real arm.
+  - Touching only our own bays is the fair-play rule.
+- **Consequence:** `SIMULATOR=1` must never run in live mode, since a faked plate would move the arm. The server refuses to load with both set (a config error).
+
+### D33. A hold replaces the camera's plate list
+- **Decision:** on reserve, the camera's list becomes `[]` by default, or the booked plate with `ECURIOUS_WHITELIST=1`. It's cleared at check-in, cancel or no-show. We never send `wildcard`.
+- **Why:**
+  - Every bay shipped with `["*"]`, so the camera lowered the arm for any car, which defeats a hold.
+  - Our own misread-tolerant match is the default, because one of the two whitelist specs suggests the camera may drop plates without a Chinese province prefix.
+- **Consequence:** with the list on, the camera lowers the arm itself for the booked car, which is the fastest path. The phase-2 test decides whether to turn it on.
+
+### D34. `cancelAutoLift` instead of keep-state modes
+- **Decision:** lock and unlock both send `{cancelAutoLift: true}`, so the arm stays where we put it. `keep-state` is only a manual recovery step.
+- **Why:**
+  - Without the flag, the device may raise the arm again after a timeout: under a car that's still manoeuvring, or on a bay the app shows as free.
+  - `keep_open` and `keep_closed` are permanent modes. They need two writes per change, and can't be read back.
+- **Consequence:** the end of a session needs no call, because the arm has been down since check-in. What auto-lift really does is checked in phase 2.
+
+### D35. Live events over SSE through a bridge; the webhook stays
+- **Decision:**
+  - A bridge, started once per server by `instrumentation.ts`, turns the Ecurious event stream into `plateEvent()` calls, one at a time.
+  - "Car left" is the engine's `vacated()`, after 10 s of vacant sensor (`ECURIOUS_VACANT_MS`). It needs no plate, so it also ends a session that was checked in by hand.
+  - A plate read in an unbooked bay waits up to 2 min for a car to actually pull in.
+  - `POST /api/plate-events` stays for any other camera source.
+- **Why:**
+  - The Ecurious server pushes its events on a stream.
+  - The debounce stops a sensor flicker from ending a session.
+  - The wait stops a passing car from marking the bay as taken.
+- **Consequence:** the stream has no replay, so `status()` also reads over REST.
+
+### D36. Hardware safety rules
+- **Decision:**
+  - The arm never rises onto a car or on an offline bay: `reserve()` reads the bay fresh and refuses, and the booking rolls back.
+  - Commands are never retried, and a failed one blocks new commands for 30 s. Reads retry twice.
+  - `status()` is cached for 5 s, serves a stale value while it re-reads, and never throws.
+  - A failed reserve rolls the booking back with the hardware's reason. A failed cancel keeps the booking reserved, so the driver can retry.
+  - Operators can lower the arm by hand from the dashboard, for recovery, and it's logged.
+- **Why:**
+  - A ground lock rising under a car is the worst possible failure.
+  - After a timeout, the arm may already be moving, or be left up with no booking.
+  - Every client polls every 2 s, and a poll must never wait on the hardware.
+- **Consequence:** the no-show release retries about twice a minute at most.
+
+### D37. An offline bay says so, and can't be booked
+- **Decision:** when `hardware.online` is false, the map pin reads "Ecurious bay, offline right now", and Reserve is disabled everywhere: the bay panel, the reserve dialog and the bay page.
+- **Why:** `reserve()` would refuse an offline bay anyway (D36). Telling drivers up front saves them a failed booking at the payment step.
+- **Consequence:** the mock always reports the bay as online, so the state only shows up in live mode.
+
+### D38. End times, not countdowns, in the header pill
+- **Decision:** the header pill shows when the hold ends ("Held until 13:38"). Countdowns elsewhere are labelled as time left, next to the clock time.
+- **Why:** a bare m:ss countdown ("12:30") read like a clock time.
+
+### D39. The product is called Baywatch
+- **Decision:** every user-facing "Ecurious" goes (app name, nav, metadata, manifest, Clerk titles, landing, bay page, emails), and every charger's button reads **"Book now"**.
+- **Why:** the team's own product name. Internals, env vars and the hardware docs keep "Ecurious", the vendor.
+- **Consequence:** this supersedes the "Powered by Ecurious" credit in D15. The paper/ink/lime/violet look stays.
+
+### D40. Booking v2: book any charger ahead, on a grid
+- **Decision:**
+  - Every GoingElectric charger is bookable (`ge-<id>`), with a simulated guard labelled "Demo: simulated guard".
+  - There are three Baywatch bays: `bw-1` → `lock-0002`, `bw-2` → `lock-0003`, and `bw-3` with no lock ("No hardware assigned yet").
+  - Bookings sit on a 15-min grid, with a 10-min gap, up to 60 days ahead, and at most 3 upcoming per driver.
+  - Classes: slow 4 h, fast 2 h, ultra 1 h.
+- **Why:** the team's plan. Reserve-now couldn't serve planned trips, and it made the cheaper cancellation tiers unreachable.
+- **Consequence:** supersedes D23. A new engine ([schedule.ts](../web/lib/schedule.ts)) with a 5 s tick, and shared types in [booking-types.ts](../web/lib/booking-types.ts).
+
+### D41. v2 fees
+- **Decision:**
+  - The fee is €2.50 × class (0.5 / 1 / 1.5) × demand by time and place, capped at €4.
+  - No-show: 100%.
+  - Cancelling: free ≥ 24 h ahead or within 2 min, then 10/50/80%.
+  - Overstay: 5 free min, then €0.30/min, capped at €12, split 50:50.
+  - Six reminders.
+- **Why:** a full no-show fee makes the reliability/prepay rule redundant, and the grid replaces the "+5 min" extension.
+- **Consequence:** supersedes D22. Details are in [reservation-model.md](reservation-model.md). The base and cap changed later, in D48.
+
+### D42. Blocked bay: re-route and credit
+- **Decision:** when a car is in a booked bay from start − 10 min, the driver is re-routed to the nearest free bays, gets a **€5 credit** (once per booking) and a free cancel, and the operator is alerted. New drivers get a **free first reservation**.
+- **Why:** turn a broken promise into the next booking, and give the app a way to bring in new drivers.
+- **Consequence:** a credit wallet in Clerk `privateMetadata`, applied to the next fee automatically.
+
+### D43. Walk-up unlock
+- **Decision:** a free bay with no booking within 30 min + the gap can be unlocked at the bay, for free, until the next booking.
+- **Evidence:** the 150 m geofence, plus, on a real lock, the camera reading **one of the driver's own plates**.
+- **Why:** it uses the gaps between bookings. A security review found that location alone, or any plate, would let anyone open a real arm.
+
+### D44. Live hardware, with the camera whitelist on and a per-bay demo rule
+- **Decision:**
+  - The dev server runs with `ECURIOUS_LIVE=1`.
+  - **The whitelist is on by default:** the booked plate is posted when the arm rises (start − 10 min) and cleared at the end. `wildcard` is never sent.
+  - `ECURIOUS_BAYS` is validated against `GET /locks` at start-up, and `lock-0001` (no longer the team's) is never called.
+  - Demo events are allowed next to live hardware, but refused (403) on bays with a real lock.
+- **Why:** the team asked for real calls. The camera lowering the arm itself is the fastest, server-independent path. The demo still needs simulated bays.
+- **Consequence:** supersedes D33's default-off whitelist and D32's global `SIMULATOR` + `ECURIOUS_LIVE` refusal.
+
+### D45. Payment is decided on the server; Stripe waits
+- **Decision:**
+  - `POST /api/reservations` ignores any `payment` field from the browser. [booking-api.ts](../web/lib/booking-api.ts) decides.
+  - The demo payment is allowed only without Stripe keys, or for voice with `VOICE_DEMO=1`.
+  - Stripe test mode (holds and capture) is built and passed a live test, but isn't wired into v2. Its keys are paused for the demo.
+- **Why:** a security review found that the browser could choose the demo payment. Wiring Stripe into the new engine didn't fit before the demo.
+
+### D46. Voice booking through Vapi
+- **Decision:**
+  - The assistant quotes, reads the quote back, and books only after a yes, using the same engine.
+  - The webhook needs `VAPI_BEARER_SECRET`.
+  - The driver comes from a session token signed with its own `VOICE_SESSION_SECRET`.
+  - The demo payment only, behind `VOICE_DEMO=1`.
+- **Why:** hands-free booking from the car. The secrets are separate, so a leaked webhook secret can't mint driver tokens.
+- **Consequence:** [voice-booking.md](voice-booking.md).
+
+### D47. One working tree, many tools
+- **Decision:** several Claude sessions, Codex and agents work in one tree. The demo fallback server runs from the stable commit `817b029` in its own worktree.
+- **Why:** speed before the demo.
+- **Consequence:** some commits swept up other tools' work ([what-did-not-work](what-did-not-work.md)).
+
+### D48. The standard reservation costs €5, capped at €10
+- **Decision:** on 2026-10-24 the team set the standard (fast) reservation to **€5**, overriding the earlier €4 cap.
+  - Slow is 0.5× (€2.50) and ultra 1.5× (€7.50), with demand tiers on top (fast: quiet €4, busy €7.50, peak €10).
+  - The cap is now **€10**.
+- **Why:** the team's pricing call for the pitch.
+- **Consequence:** supersedes the base and cap in D41. The tables are in [reservation-model.md](reservation-model.md#fees-by-class-and-demand).
+
+### D49. The Flutter app is a native port of the web UI, on the same API and accounts
+- **Decision:** on 2026-10-24 a teammate opened the Flutter app and saw the old single-screen prototype, so `mobile/` was rewritten as a screen-by-screen port of the web app.
+  - Same screens, copy, rules and brand tokens. Each Dart file names the web file it ports ([mobile/README.md](../mobile/README.md)).
+  - Sign-in with the same Clerk accounts. On phones it uses the community Dart SDK `clerk_auth` (pinned `0.0.18-beta`) in native mode. In a browser, Clerk refuses that mode (a request may not carry both `Origin` and `Authorization`), so the web build talks to the official clerk-js through a small bridge (`mobile/web/clerk_bridge.js`). Either way, the app sends Clerk's session JWT as `Authorization: Bearer`, and the server's `auth()` accepts it like the cookie, so no backend change was needed.
+  - `GET /api/config` returns the server's `NEXT_PUBLIC_*` Clerk key and Vapi assistant, so the app always uses the server's Clerk instance and shows the mic exactly when the web does.
+  - The map is `flutter_map` with MapTiler's Positron raster tiles (the teammate's MapTiler key), the closest raster match to the web's OpenFreeMap Positron. The three brand fonts are bundled as static TTFs.
+  - Voice uses the official `vapi` Flutter SDK (web: Vapi's JS SDK; phones: Daily WebRTC, which needs Android 7.0+).
+- **Why:** the team asked for Flutter and a native app, and a WebView shell would block Google sign-in and need extra permission plumbing anyway. A port keeps the app native at the cost of keeping two UIs in step.
+- **Consequence:** supersedes D4. Every web UI change needs the same change in `mobile/`. Google sign-in, push notifications and deep links stay in the Next.js web app for now ([limitations](limitations-and-scaling.md)).
+
+### D50. The camera's own check-in counts only with a confirmed plate list
+- **Decision:** when the camera lowers the arm by itself and a car is on the sensor but no plate was read, the engine checks the booking in only if the camera's allow-list is confirmed to be exactly the booking's plates (`listOk === true`). An unknown list counts as empty (nothing set yet, for example after a restart), so a list that differs is set again.
+- **Why:** an automated security review found the old rule failed open. It refused only a list known to be wrong, so with an unknown or "any car" list, a stranger's car could check in a booked driver.
+- **Consequence:** in doubt, the driver taps "I'm at the bay" (camera or sensor evidence plus 150 m), as for an unreadable plate. See [hardware-integration.md](hardware-integration.md#events--the-engine).
+

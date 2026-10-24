@@ -5,13 +5,13 @@ import type { GeoJSONSource } from 'maplibre-gl';
 import { Zap } from 'lucide-react';
 import { useMemo, useRef, useState } from 'react';
 import MapGL, { Layer, Marker, NavigationControl, Source, type MapLayerMouseEvent, type MapRef } from 'react-map-gl/maplibre';
-import type { Charger } from '@/lib/goingelectric';
+import type { Bay } from '@/lib/booking-types';
 import type { Point } from '@/lib/geo';
 
 export type View = { center: Point; bounds: [number, number, number, number]; zoom: number };
-export type BayLook = 'free' | 'mine' | 'busy';
 
-const maxPower = (c: Charger) => Math.max(0, ...c.points.map((p) => p.power));
+const STATUS_WORD: Record<Bay['status'], string> = { free: 'free', reserved: 'reserved', occupied: 'occupied', offline: 'offline right now' };
+const PIN_GAP_PX = 64; // the Baywatch bays stand a few metres apart, so their pins sit side by side at any zoom
 
 // MapLibre paints with plain colour strings, so read the theme tokens once and resolve them
 // through a canvas pixel (this also turns oklch into rgb, which MapLibre can't parse)
@@ -36,41 +36,41 @@ function themeColors() {
   };
 }
 
-// Hundreds of public chargers are one clustered GeoJSON source drawn by the GPU; only the Ecurious bay
-// is a DOM marker. Colours are the theme tokens (ink for DC ≥ 50 kW, context grey for AC, danger for faults).
+// Hundreds of GoingElectric bays are one clustered GeoJSON source drawn by the GPU (ink ring: fast, grey: slow,
+// red: offline or faulty). The three Baywatch bays are DOM markers: big, violet, always on the map.
 export default function MapView({
-  chargers,
-  bay,
-  bayLook,
+  bays,
+  realBays,
+  center,
   selectedId,
   me,
   onReady,
   onView,
-  onSelectCharger,
-  onSelectBay,
+  onSelect,
 }: {
-  chargers: Charger[];
-  bay: Point;
-  bayLook: BayLook;
-  selectedId: number | null;
+  bays: Bay[];
+  realBays: Bay[];
+  center: Point;
+  selectedId: string | null;
   me: Point | null;
   onReady: (map: MapRef) => void;
   onView: (v: View) => void;
-  onSelectCharger: (id: number) => void;
-  onSelectBay: () => void;
+  onSelect: (id: string) => void;
 }) {
   const ref = useRef<MapRef>(null);
   const [c] = useState(themeColors); // read once; this component only renders in the browser
   const data = useMemo(
     () => ({
       type: 'FeatureCollection' as const,
-      features: chargers.map((c) => ({
-        type: 'Feature' as const,
-        geometry: { type: 'Point' as const, coordinates: [c.lng, c.lat] },
-        properties: { id: c.id, fast: maxPower(c) >= 50, fault: c.fault },
-      })),
+      features: bays
+        .filter((b) => !b.real)
+        .map((b) => ({
+          type: 'Feature' as const,
+          geometry: { type: 'Point' as const, coordinates: [b.lng, b.lat] },
+          properties: { id: b.id, fast: b.powerKw >= 50, offline: b.status === 'offline' },
+        })),
     }),
-    [chargers],
+    [bays],
   );
 
   function report() {
@@ -85,25 +85,25 @@ export default function MapView({
     const f = e.features?.[0];
     if (!f) return;
     if (f.properties?.cluster) {
-      const source = ref.current?.getSource('chargers') as GeoJSONSource | undefined;
+      const source = ref.current?.getSource('bays') as GeoJSONSource | undefined;
       const zoom = await source?.getClusterExpansionZoom(f.properties.cluster_id);
       if (f.geometry.type === 'Point') {
         const [lng, lat] = f.geometry.coordinates;
         ref.current?.easeTo({ center: [lng, lat], zoom: (zoom ?? 14) + 0.3, duration: 500 });
       }
-    } else onSelectCharger(Number(f.properties?.id));
+    } else if (f.properties?.id) onSelect(String(f.properties.id));
   }
 
   return (
     <MapGL
       ref={ref}
-      initialViewState={{ longitude: bay.lng, latitude: bay.lat, zoom: 13.4 }}
+      initialViewState={{ longitude: center.lng, latitude: center.lat, zoom: 13.4 }}
       mapStyle="https://tiles.openfreemap.org/styles/positron"
       attributionControl={{
         compact: true,
         customAttribution: 'Charging data © <a href="https://www.goingelectric.de/stromtankstellen/" target="_blank" rel="noopener">GoingElectric.de</a>',
       }}
-      interactiveLayerIds={['clusters', 'chargers']}
+      interactiveLayerIds={['clusters', 'bays']}
       onClick={click}
       onLoad={() => {
         if (ref.current) onReady(ref.current);
@@ -113,7 +113,7 @@ export default function MapView({
       cursor="auto"
       style={{ position: 'absolute', inset: 0 }}
     >
-      <Source id="chargers" type="geojson" data={data} cluster clusterRadius={34} clusterMaxZoom={13}>
+      <Source id="bays" type="geojson" data={data} cluster clusterRadius={34} clusterMaxZoom={13}>
         <Layer
           id="clusters"
           type="circle"
@@ -134,14 +134,14 @@ export default function MapView({
           paint={{ 'text-color': c.surface }}
         />
         <Layer
-          id="chargers"
+          id="bays"
           type="circle"
           filter={['!', ['has', 'point_count']]}
           paint={{
             'circle-color': c.surface,
-            'circle-radius': ['case', ['==', ['get', 'id'], selectedId ?? -1], 10, 7],
-            'circle-stroke-width': ['case', ['==', ['get', 'id'], selectedId ?? -1], 4, 3],
-            'circle-stroke-color': ['case', ['get', 'fault'], c.danger, ['==', ['get', 'id'], selectedId ?? -1], c.accent, ['get', 'fast'], c.ink, c.context],
+            'circle-radius': ['case', ['==', ['get', 'id'], selectedId ?? ''], 10, 7],
+            'circle-stroke-width': ['case', ['==', ['get', 'id'], selectedId ?? ''], 4, 3],
+            'circle-stroke-color': ['case', ['get', 'offline'], c.danger, ['==', ['get', 'id'], selectedId ?? ''], c.accent, ['get', 'fast'], c.ink, c.context],
           }}
         />
       </Source>
@@ -153,22 +153,45 @@ export default function MapView({
         </Source>
       )}
 
-      <Marker longitude={bay.lng} latitude={bay.lat} anchor="bottom" onClick={(e) => (e.originalEvent.stopPropagation(), onSelectBay())}>
-        <button
-          type="button"
-          aria-label={{ free: 'Ecurious bay, free to reserve', mine: 'Ecurious bay, booked by you', busy: 'Ecurious bay, taken right now' }[bayLook]}
-          className="group relative grid cursor-pointer place-items-center"
-        >
-          {bayLook === 'free' && <span className="absolute top-1 size-10 animate-pulse-ring rounded-full bg-signal/70" />}
-          <span
-            className={`relative grid size-11 place-items-center rounded-full rounded-br-none rotate-45 shadow-[0_8px_20px_-6px_rgb(15_20_25/0.45)] ring-3 transition-transform group-hover:scale-105 ${
-              bayLook === 'busy' ? 'bg-sunken ring-faint' : 'bg-signal ring-ink'
-            }`}
+      {realBays.map((b, i) => {
+        const offline = b.status === 'offline';
+        const selected = b.id === selectedId;
+        return (
+          <Marker
+            key={b.id}
+            longitude={b.lng}
+            latitude={b.lat}
+            anchor="bottom"
+            offset={[(i - (realBays.length - 1) / 2) * PIN_GAP_PX, 0]}
+            onClick={(e) => (e.originalEvent.stopPropagation(), onSelect(b.id))}
           >
-            <Zap className={`size-5 -rotate-45 ${bayLook === 'busy' ? 'fill-faint text-faint' : 'fill-ink text-ink'}`} />
-          </span>
-        </button>
-      </Marker>
+            <button
+              type="button"
+              aria-label={`${b.name}, ${b.guard === 'hardware' ? 'real barrier' : 'no hardware assigned yet'}, ${STATUS_WORD[b.status]}${b.led === 'green' ? ', can be unlocked now' : ''}`}
+              aria-pressed={selected}
+              className="group relative flex cursor-pointer flex-col items-center gap-1"
+            >
+              {b.led === 'green' && !offline && <span className="absolute top-1.5 size-12 animate-pulse-ring rounded-full bg-accent/40" />}
+              {/* big and violet: the three real bays are the demo, wherever the map is */}
+              <span
+                className={`relative grid size-14 rotate-45 place-items-center rounded-full rounded-br-none shadow-[0_10px_24px_-6px_rgb(15_20_25/0.5)] transition-transform group-hover:scale-105 ${
+                  offline ? 'bg-sunken ring-3 ring-faint' : 'bg-accent ring-3 ring-surface'
+                } ${selected ? 'scale-110 outline-3 outline-offset-2 outline-ink' : ''}`}
+              >
+                <Zap aria-hidden className={`size-6 -rotate-45 ${offline ? 'fill-faint text-faint' : 'fill-surface text-surface'}`} />
+              </span>
+              {/* the virtual LED: green (lime) can unlock now, red reserved soon or occupied */}
+              {!offline && (
+                <span aria-hidden className={`absolute -right-0.5 top-0 size-3.5 rounded-full ring-2 ring-surface ${b.led === 'green' ? 'bg-signal' : 'bg-danger'}`} />
+              )}
+              {/* the three pins look alike: the number tells them apart */}
+              <span aria-hidden className="rounded-full bg-ink px-2 py-0.5 font-mono text-[0.6875rem] font-semibold uppercase tracking-[0.06em] text-on-brand">
+                {b.name.replace(/^Baywatch /, '')}
+              </span>
+            </button>
+          </Marker>
+        );
+      })}
 
       <NavigationControl position="bottom-right" showCompass={false} />
     </MapGL>

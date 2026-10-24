@@ -3,6 +3,10 @@
 // "m-ab 1234" and "MAB1234" are the same plate
 export const normalizePlate = (p: unknown) => String(p ?? '').toUpperCase().replace(/[^A-Z0-9ÄÖÜ]/g, '');
 
+// The plate as the bay camera reads it, for the camera's own allow-list: only spaces, dashes and the like go,
+// Han characters stay ("湘A 613-EN" → "湘A613EN"; the camera matches its list exactly)
+export const cameraPlate = (p: unknown) => String(p ?? '').toUpperCase().replace(/[^\p{Script=Han}\p{Script=Latin}0-9]/gu, '');
+
 export const maskPlate = (p: string) => (p.length <= 4 ? '•••' : `${p.slice(0, 2)}•••${p.slice(-2)}`);
 
 // Characters an OCR camera confuses, mapped to one canonical form

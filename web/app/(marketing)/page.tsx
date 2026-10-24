@@ -7,9 +7,25 @@ import { LiveBayStatus } from '@/components/landing/live-bay-status';
 import { NearbyChargers } from '@/components/landing/nearby-chargers';
 import { PhoneMockup } from '@/components/landing/phone-mockup';
 import { buttonClass } from '@/components/ui/button';
-import { Logo, PoweredByEcurious } from '@/components/ui/logo';
-import { BLOCKED_DC_HOUR_MARGIN, CPO_SHARE, EXTENSION_MIN, feeRules, formatEuro, FREE_CANCEL_MIN, PRICES, RESERVATION_FROM_CENTS } from '@/lib/pricing';
-import { holdMinutes } from '@/lib/server';
+import { Logo } from '@/components/ui/logo';
+import {
+  ARRIVAL_GRACE_MS,
+  BLOCK_MS,
+  BLOCKED_CREDIT_CENTS,
+  bookingFee,
+  cancelSchedule,
+  CLASSES,
+  DEMAND,
+  FREE_CANCEL_MS,
+  HORIZON_MS,
+  IDLE_CENTS_PER_MIN,
+  IDLE_GRACE_MS,
+  MAX_RESERVATION_CENTS,
+  OVERSTAY_CAP_CENTS,
+} from '@/lib/booking-rules';
+import type { BayClass, DemandLevel } from '@/lib/booking-types';
+import { BLOCKED_DC_HOUR_MARGIN, formatEuro, PRICES } from '@/lib/pricing';
+import { CPO_OVERSTAY_SHARE, CPO_RESERVATION_SHARE } from '@/lib/revenue';
 
 // Ecurious's container: 1280px wide, with gutters that grow with the screen
 const wrap = 'mx-auto max-w-7xl px-[clamp(1.25rem,5vw,5rem)]';
@@ -18,14 +34,32 @@ const arrow = <ArrowRight className="size-5 transition-transform duration-200 gr
 // Ecurious's square bullet: decorative, the text says it all
 const bullet = <span aria-hidden className="mt-2 size-2 shrink-0 bg-signal" />;
 
+// Every number on this page comes from the booking rules, so the copy can't drift from them
+const MIN = 60_000;
+const HOUR = 60 * MIN;
+const minutes = (ms: number) => Math.round(ms / MIN);
+const hours = (ms: number) => Math.round(ms / HOUR);
+const duration = (ms: number) => (ms >= HOUR ? `${hours(ms)} h` : `${minutes(ms)} min`);
+const percent = (share: number) => Math.round(share * 100);
+
+const classes = Object.keys(CLASSES) as BayClass[];
+const levels = Object.keys(DEMAND) as DemandLevel[];
+// the lowest fee there is: the slowest class at the quietest time
+const FROM_CENTS = Math.min(...classes.flatMap((c) => levels.map((l) => bookingFee(c, l).cents)));
+// the paid cancelling steps of a booking made three days ahead, as times before its start
+const AHEAD = 72 * HOUR;
+const [firstPaid, ...laterPaid] = cancelSchedule(100, 0, AHEAD)
+  .filter((step) => step.percent > 0)
+  .map((step) => ({ percent: step.percent, before: duration(AHEAD - step.from + 1) }));
+
 const steps = [
-  { scene: 'find', title: 'Find', text: 'Search public chargers on the map. Bays with an Ecurious guard can be reserved.' },
+  { scene: 'find', title: 'Find', text: 'Search chargers on the map and pick one. Every charger can be booked through Baywatch.' },
   {
     scene: 'guarded',
-    title: 'Reserve',
-    text: `Pick your car and pay from ${formatEuro(RESERVATION_FROM_CENTS)}. The guard rises and holds the bay for ${holdMinutes} minutes.`,
+    title: 'Book',
+    text: `Pick a day up to ${Math.round(HORIZON_MS / (24 * HOUR))} days ahead, then a start and a length in ${minutes(BLOCK_MS)}-minute blocks. The guard keeps the bay free for you.`,
   },
-  { scene: 'arriving', title: 'Arrive', text: `The camera reads your plate and lowers the guard. Running late? Add ${EXTENSION_MIN} minutes.` },
+  { scene: 'arriving', title: 'Arrive', text: `The camera reads your plate and lowers the guard. You can arrive up to ${minutes(ARRIVAL_GRACE_MS)} minutes after your start.` },
   { scene: 'charging', title: 'Charge', text: 'Plug in as usual. When you drive off, the bay is free for the next driver.' },
 ] as const;
 
@@ -33,7 +67,7 @@ const covered = [
   {
     icon: TriangleAlert,
     title: 'Someone parked in your bay',
-    text: 'Your timer pauses, the operator is alerted, and you see the nearest free chargers. Cancelling is free.',
+    text: `The operator is alerted, you see the nearest free chargers and you get ${formatEuro(BLOCKED_CREDIT_CENTS)} credit. Cancelling is free, and if the bay clears, you get the lost time back.`,
   },
   {
     icon: ScanLine,
@@ -47,12 +81,20 @@ const covered = [
   },
 ];
 
-const driverRules = Object.values(feeRules(holdMinutes));
+const driverRules = [
+  `Busy hours ×${DEMAND.busy.percent / 100}, quiet nights ×${DEMAND.quiet.percent / 100}, and never more than ${formatEuro(MAX_RESERVATION_CENTS)}`,
+  `Free to cancel until ${firstPaid.before} before the start, and for ${minutes(FREE_CANCEL_MS)} min after booking. Then ${firstPaid.percent}%, ${laterPaid
+    .map((step) => `${step.percent}% from ${step.before} before`)
+    .join(' and ')}`,
+  `Arrive up to ${minutes(ARRIVAL_GRACE_MS)} min after your start. After that it’s a no-show and the fee is kept`,
+  `${minutes(IDLE_GRACE_MS)} free minutes after your slot, then ${formatEuro(IDLE_CENTS_PER_MIN)} a minute, at most ${formatEuro(OVERSTAY_CAP_CENTS)}`,
+  'Your first booking is free',
+];
 
 const operatorRules = [
   'Blocked-bay alerts by email and on the dashboard',
   'Utilisation, no-show and check-in numbers per bay',
-  `${Math.round(CPO_SHARE * 100)}% of every reservation fee goes to you`,
+  `${percent(CPO_RESERVATION_SHARE)}% of every booking fee and ${percent(CPO_OVERSTAY_SHARE)}% of idle fees go to you`,
   'An open, OCPI-style API so other apps can book your bays',
 ];
 
@@ -68,7 +110,7 @@ export default function Landing() {
     <>
       <div className="bg-page text-ink">
         <header className={`${wrap} flex items-center justify-between gap-4 py-5`}>
-          <Link href="/" aria-label="Ecurious Reserve home" className="rounded-lg">
+          <Link href="/" aria-label="Baywatch home" className="rounded-lg">
             <Logo />
           </Link>
           <nav aria-label="Main" className="hidden items-center gap-7 text-[0.95rem] font-medium md:flex">
@@ -91,7 +133,7 @@ export default function Landing() {
               <Link href="/sign-in" className={buttonClass('secondary', 'sm')}>
                 Sign in
               </Link>
-              {/* phones get the hero's big "Reserve a bay" instead */}
+              {/* phones get the hero's big "Book a bay" instead */}
               <Link href="/sign-up" className={buttonClass('signal', 'sm', 'max-sm:hidden')}>
                 Get started
               </Link>
@@ -113,20 +155,20 @@ export default function Landing() {
               Your charging spot, <span className="text-accent">kept free.</span>
             </h1>
             <p className="mt-6 max-w-[40ch] animate-rise text-[clamp(1.1875rem,2vw,1.375rem)] leading-normal text-muted [animation-delay:160ms]">
-              Reserve a public charger before you set off. A guard holds the bay, and the camera lets your car in when
-              you arrive.
+              Book a public charger before you set off. A guard holds the bay for your slot, and the camera lets your car
+              in when you arrive.
             </p>
             <div className="mt-9 flex animate-rise flex-col gap-3 [animation-delay:240ms] sm:flex-row sm:items-center">
               <Link href="/sign-up" className={buttonClass('signal', 'lg')}>
-                Reserve a bay {arrow}
+                Book a bay {arrow}
               </Link>
               <a href="#how" className={buttonClass('secondary', 'lg')}>
                 How it works
               </a>
             </div>
             <p className="mt-7 animate-rise font-mono text-xs uppercase leading-relaxed tracking-[0.08em] text-muted [animation-delay:320ms]">
-              From {formatEuro(RESERVATION_FROM_CENTS)} per booking · Free cancellation for {FREE_CANCEL_MIN} minutes · Plate deleted
-              after every session
+              From {formatEuro(FROM_CENTS)} per booking · Free to cancel until {firstPaid.before} before · Plate deleted after
+              every session
             </p>
           </div>
 
@@ -135,7 +177,7 @@ export default function Landing() {
             {/* widths are set per breakpoint so the card never covers the phone's screen, only its bezel at most */}
             <div className="relative animate-rise [animation-delay:200ms] sm:mr-10 lg:mr-0 xl:mr-10">
               <div className="-rotate-4 motion-safe:animate-float">
-                <PhoneMockup holdMinutes={holdMinutes} />
+                <PhoneMockup />
               </div>
             </div>
             <figure className="absolute bottom-0 left-1 w-44 animate-rise [animation-delay:380ms] sm:bottom-10 sm:left-0 sm:w-48 lg:w-40 xl:w-48">
@@ -191,7 +233,7 @@ export default function Landing() {
                 <span className="grid size-6 place-items-center rounded-full bg-warn-tint text-warn">
                   <TriangleAlert className="size-3.5" />
                 </span>
-                Hold paused · operator alerted
+                Deadline paused · operator alerted
               </figcaption>
             </figure>
             <div>
@@ -218,9 +260,30 @@ export default function Landing() {
               <h3 className="font-mono text-xs font-medium uppercase tracking-[0.14em] text-muted">For drivers</h3>
               <p className="mt-4 flex flex-wrap items-baseline gap-x-3 gap-y-1">
                 <span className="font-mono text-sm uppercase tracking-[0.08em] text-muted">From</span>
-                <span className="font-display text-7xl leading-[0.9] text-accent">{formatEuro(RESERVATION_FROM_CENTS)}</span>
-                <span className="font-mono text-sm uppercase tracking-[0.08em] text-muted">per reservation</span>
+                <span className="font-display text-7xl leading-[0.9] text-accent">{formatEuro(FROM_CENTS)}</span>
+                <span className="font-mono text-sm uppercase tracking-[0.08em] text-muted">per booking</span>
               </p>
+              <table className="mt-8 w-full text-left">
+                <caption className="pb-3 text-left text-sm text-muted">One fee per booking, whatever its length. At normal demand:</caption>
+                <thead className="font-mono text-xs uppercase tracking-[0.1em] text-muted">
+                  <tr>
+                    <th scope="col" className="pb-2 font-medium">Charger</th>
+                    <th scope="col" className="pb-2 font-medium">Book up to</th>
+                    <th scope="col" className="pb-2 text-right font-medium">Fee</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-line border-y border-line">
+                  {classes.map((c) => (
+                    <tr key={c}>
+                      <th scope="row" className="py-3 pr-3 font-semibold">
+                        {CLASSES[c].label}
+                      </th>
+                      <td className="py-3 pr-3 font-mono text-sm">{duration(CLASSES[c].maxBlocks * BLOCK_MS)}</td>
+                      <td className="py-3 text-right font-mono font-semibold">{formatEuro(bookingFee(c, 'normal').cents)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
               <ul className="mt-8 grid gap-3.5">
                 {driverRules.map((r) => (
                   <li key={r} className="flex gap-3">
@@ -230,7 +293,7 @@ export default function Landing() {
                 ))}
               </ul>
               <Link href="/sign-up" className={buttonClass('primary', 'lg', 'mt-10 self-start')}>
-                Reserve a bay {arrow}
+                Book a bay {arrow}
               </Link>
             </article>
 
@@ -255,7 +318,7 @@ export default function Landing() {
               </p>
               {/* no self-serve operator sign-up yet: a plain line of text, deliberately not styled like a button */}
               <p className="mt-8 flex items-center gap-2.5 text-lg font-semibold">
-                <MessagesSquare className="size-5 shrink-0 text-signal" /> Talk to us at the Ecurious stand.
+                <MessagesSquare className="size-5 shrink-0 text-signal" /> Talk to us at our stand.
               </p>
             </article>
           </div>
@@ -286,7 +349,7 @@ export default function Landing() {
             </h2>
             <div className="flex flex-wrap gap-3">
               <Link href="/sign-up" className={buttonClass('signal', 'lg')}>
-                Reserve a bay {arrow}
+                Book a bay {arrow}
               </Link>
               <Link href="/sign-in" className={buttonClass('on-brand', 'lg')}>
                 Sign in
@@ -300,7 +363,7 @@ export default function Landing() {
         <div className={`${wrap} flex flex-col gap-6 py-12 text-sm md:flex-row md:items-end md:justify-between`}>
           <div className="flex flex-col gap-3">
             <Logo tone="light" />
-            <p>A prototype for the Ecurious smart reservation challenge.</p>
+            <p>A hackathon prototype for reserving public chargers.</p>
           </div>
           <div className="flex flex-col gap-3 md:items-end">
             <p className="max-w-[60ch] font-mono text-xs uppercase leading-relaxed tracking-[0.06em] md:text-right">
@@ -318,7 +381,6 @@ export default function Landing() {
               </a>
               .
             </p>
-            <PoweredByEcurious />
           </div>
         </div>
       </footer>

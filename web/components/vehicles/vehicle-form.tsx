@@ -42,7 +42,7 @@ export function VehicleForm({ onAdded, submitLabel = 'Add car' }: { onAdded: (v:
           autoCapitalize="characters"
           spellCheck={false}
           placeholder="M AB 1234"
-          className={`${inputClass} font-mono text-lg font-semibold tracking-[0.06em]`}
+          className={`${inputClass} font-mono text-lg font-semibold uppercase tracking-[0.06em]`}
         />
       </Field>
       {plate.trim() && (
@@ -56,7 +56,7 @@ export function VehicleForm({ onAdded, submitLabel = 'Add car' }: { onAdded: (v:
       <label className="flex cursor-pointer gap-3 rounded-2xl bg-sunken p-4">
         <input type="checkbox" checked={consent} onChange={(e) => setConsent(e.target.checked)} className="mt-0.5 size-5 shrink-0 accent-brand" />
         <span className="text-[0.95rem] leading-relaxed">
-          <span className="font-semibold">Use this plate to check me in at Ecurious bays.</span> The camera compares what it reads
+          <span className="font-semibold">Use this plate to check me in at Baywatch bays.</span> The camera compares what it reads
           with your booking only. Each booking forgets the plate when it ends, and you can delete this car at any time.
         </span>
       </label>

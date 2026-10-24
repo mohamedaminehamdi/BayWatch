@@ -1,16 +1,22 @@
-// Live camera and car-sensor events from the Ecurious server → the reservation engine. instrumentation.ts
-// starts it once per server process, in live hardware mode only. Events for other bays are ignored.
-//   plate read         → plateEvent(plate, 'in'): checks the booked car in (the engine then lowers the arm)
-//                        or flags another car. In an unbooked bay it waits until a car really pulls in, so a
-//                        car driving past doesn't mark the bay as taken.
-//   sensor: occupied   → plateEvent(<plate read in the last 2 min, or '' = unreadable>, 'in')
-//   sensor: vacant     → still vacant after ECURIOUS_VACANT_MS: plateEvent(<checked-in plate>, 'out'), "car left"
+// Live camera and car-sensor events from the Ecurious server → the booking engine (schedule.ts), one bridge per
+// Baywatch bay with a lock. instrumentation.ts starts them once per server process, in live hardware mode only.
+// Events for other locks are ignored.
+//   plate read         → carSeen(bay, plate) (walk-up evidence), and plateEvent(bay, plate) when a booking is live or a car
+//                        is already on the sensor: checks the booked car in (the engine lowers the arm). In a bay
+//                        with nothing booked it waits until a car really pulls in, so a car driving past is ignored.
+//   sensor: occupied   → plateEvent(bay, <plate read in the last 2 min, or '' = unreadable>)
+//   sensor: vacant     → still vacant after ECURIOUS_VACANT_MS: vacated(bay), "car left" (no plate needed)
 // Plates stay in memory only, never in a log.
 import * as hw from './ecurious.ts';
 import { connectEvents, toEvent, type HwEvent } from './ecurious-events.ts';
-import type { createReservations } from './reservation.ts';
 
-type Engine = Pick<ReturnType<typeof createReservations>, 'plateEvent' | 'state'>;
+// the part of the booking engine the bridge drives
+type Engine = {
+  plateEvent(bayId: string, plate: unknown): Promise<{ matched: boolean }>;
+  vacated(bayId: string): unknown;
+  held(bayId: string): boolean;
+  carSeen(bayId: string, plate: unknown): void;
+};
 
 const FRESH_MS = 2 * 60_000; // a plate read counts for the car that pulls in within 2 min
 // the sensor's debounce: a car only "left" once the bay stayed empty this long (a calibration knob)
@@ -18,38 +24,42 @@ const VACANT_MS = Number(process.env.ECURIOUS_VACANT_MS ?? 10_000);
 
 export function createBridge(
   engine: Engine,
-  { lockId, presence, vacantMs = VACANT_MS, now = Date.now }: { lockId: string; presence?: string | null; vacantMs?: number; now?: () => number },
+  {
+    bayId,
+    lockId,
+    presence,
+    vacantMs = VACANT_MS,
+    now = Date.now,
+  }: { bayId: string; lockId: string; presence?: string | null; vacantMs?: number; now?: () => number },
 ) {
   let seen: { plate: string; at: number } | null = null; // the last plate read
-  let checkedIn: string | null = null; // the booked car's plate, once the camera checked it in
   let leaving: ReturnType<typeof setTimeout> | undefined;
   let queue: Promise<unknown> = Promise.resolve();
   // one event at a time, in order: plateEvent waits for the arm
-  const run = (fn: () => Promise<unknown>) =>
+  const run = (fn: () => Promise<unknown> | unknown) =>
     (queue = queue.then(fn).catch((e) => console.error(`[ecurious] event not applied: ${(e as Error).message}`)));
-  const arrive = (plate: string) =>
-    run(async () => {
-      if ((await engine.plateEvent(plate, 'in')).matched) checkedIn = plate;
-    });
+  const arrive = (plate: string) => run(() => engine.plateEvent(bayId, plate));
 
   function handle(e: HwEvent) {
     if (e.lockId !== lockId) return queue;
     if (e.type === 'photo') {
       seen = { plate: e.plate, at: now() };
+      engine.carSeen(bayId, e.plate); // walk-up needs the read plate to be one of the driver's cars
       // a held bay: decide now, the arm is up and the car can't pull in before check-in
-      if (presence === 'occupied' || engine.state(null).reservation?.status === 'reserved') return arrive(e.plate);
+      if (presence === 'occupied' || engine.held(bayId)) return arrive(e.plate);
     } else if (e.type === 'presence') {
       const was = presence;
       presence = e.presence;
-      clearTimeout(leaving);
-      if (e.presence === 'occupied' && was !== 'occupied') return arrive(seen && now() - seen.at <= FRESH_MS ? seen.plate : '');
-      if (e.presence === 'vacant' && was === 'occupied') {
+      if (e.presence === 'occupied') {
+        clearTimeout(leaving); // the "vacant" was a flicker: the car is still there
+        if (was !== 'occupied') return arrive(seen && now() - seen.at <= FRESH_MS ? seen.plate : '');
+      } else if (was === 'occupied') {
+        const since = now();
         leaving = setTimeout(
           () =>
-            run(async () => {
-              const plate = checkedIn ?? '';
-              checkedIn = seen = null;
-              await engine.plateEvent(plate, 'out');
+            run(() => {
+              if (seen && seen.at <= since) seen = null; // a read after the car left belongs to the next car
+              return engine.vacated(bayId);
             }),
           vacantMs,
         );
@@ -61,34 +71,32 @@ export function createBridge(
   return { handle, stop: () => clearTimeout(leaving) };
 }
 
-// One bridge per process. A dev reload runs register() again: the old bridge is stopped, never doubled.
-const g = globalThis as typeof globalThis & { ecurious_bridge_v1?: () => void };
+// One stream for all locks, one bridge per bay. A dev reload runs register() again: the old bridges are stopped,
+// never doubled.
+const g = globalThis as typeof globalThis & { ecurious_bridge_v2?: () => void };
 
 export function startBridge() {
   if (!hw.live()) return;
-  g.ecurious_bridge_v1?.();
+  g.ecurious_bridge_v2?.();
   let stopped = false;
   let stop = () => {};
-  g.ecurious_bridge_v1 = () => {
+  g.ecurious_bridge_v2 = () => {
     stopped = true;
     stop();
   };
-  if (process.env.SIMULATOR === '1') console.warn('[ecurious] SIMULATOR=1 with live hardware: a faked plate moves the real arm');
 
   void (async () => {
     // the engine singleton the route handlers use: it lives on globalThis (server.ts)
-    const { reservations } = await import('./server');
-    let lockId = '';
-    for (let delay = 2_000; !lockId; delay = Math.min(delay * 2, 60_000)) {
-      try {
-        lockId = await hw.lockId();
-      } catch (e) {
-        console.warn(`[ecurious] bay not resolved (${(e as Error).message}), retrying in ${delay / 1000} s`);
-        await new Promise((r) => setTimeout(r, delay));
-      }
+    const { schedule, validateLocks } = await import('./server');
+    for (let delay = 2_000; !(await validateLocks()); delay = Math.min(delay * 2, 60_000)) {
+      console.warn(`[ecurious] the team's locks could not be read, retrying in ${delay / 1000} s`);
+      await new Promise((r) => setTimeout(r, delay));
       if (stopped) return;
     }
-    const bridge = createBridge(reservations, { lockId, presence: (await hw.status()).carPresence });
+    const bays = schedule.realBays().filter((b) => b.lockId);
+    const bridges = await Promise.all(
+      bays.map(async (b) => createBridge(schedule, { bayId: b.id, lockId: b.lockId!, presence: (await hw.status(b.lockId)).carPresence })),
+    );
     const unknown = new Set<string>();
     const conn = connectEvents({
       open: hw.openEvents,
@@ -96,7 +104,7 @@ export function startBridge() {
         const e = toEvent(m);
         if (e) {
           hw.noteEvent(e);
-          void bridge.handle(e);
+          for (const b of bridges) void b.handle(e);
         } else if (m.event !== 'connected' && !unknown.has(m.event)) {
           unknown.add(m.event);
           console.info(`[ecurious] event not handled: ${m.event}`); // the name only: the payload may hold a plate
@@ -104,13 +112,13 @@ export function startBridge() {
       },
       onState: (up, why) => {
         hw.noteStream(up);
-        if (up) console.info(`[ecurious] live events connected, bay ${lockId}`);
+        if (up) console.info(`[ecurious] live events connected, bays ${bays.map((b) => `${b.id} (${b.lockId})`).join(', ')}`);
         else console.warn(`[ecurious] live events down (${why}), reconnecting`);
       },
     });
     stop = () => {
       conn.stop();
-      bridge.stop();
+      for (const b of bridges) b.stop();
     };
     if (stopped) stop();
   })().catch((e) => console.error(`[ecurious] bridge not started: ${(e as Error).message}`));

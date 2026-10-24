@@ -19,15 +19,15 @@ const DAY = 24 * H;
 const start = Date.parse('2026-10-30T14:00:00+01:00');
 
 test('reservation fee: baseline by type, scaled by demand, never above the cap', () => {
-  assert.deepEqual(reservationFee('fast'), { cents: 250, demand: 'Normal', multiplier: 1 }, 'no occupancy data: normal');
-  assert.equal(reservationFee('fast', NaN).cents, 250);
+  assert.deepEqual(reservationFee('fast'), { cents: 500, demand: 'Normal', multiplier: 1 }, 'no occupancy data: normal');
+  assert.equal(reservationFee('fast', NaN).cents, 500);
   assert.equal(reservationFee('slow', 0.5).cents, 150);
-  assert.equal(reservationFee('fast', 0.1).cents, 200, 'quiet: 0.8x');
+  assert.equal(reservationFee('fast', 0.1).cents, 400, 'quiet: 0.8x');
   assert.equal(reservationFee('slow', 0.29).cents, 120);
   assert.equal(reservationFee('slow', 0.3).cents, 150, 'a tier starts at its lower bound');
-  assert.equal(reservationFee('fast', 0.7).cents, 375, 'busy: 1.5x');
+  assert.equal(reservationFee('fast', 0.7).cents, 750, 'busy: 1.5x');
   assert.equal(reservationFee('slow', 0.9).cents, 300, 'peak: 2x');
-  assert.equal(reservationFee('fast', 0.95).cents, MAX_RESERVATION_CENTS, 'fast at peak would be €5.00, capped at €4.00');
+  assert.equal(reservationFee('fast', 0.95).cents, MAX_RESERVATION_CENTS, 'fast at peak: 2× €5, the €10 cap');
   assert.equal(reservationFee('fast', 7).cents, MAX_RESERVATION_CENTS);
 });
 

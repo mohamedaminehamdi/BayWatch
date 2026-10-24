@@ -41,7 +41,6 @@
   --color-warn-tint: oklch(0.9512 0.0254 56.1); /* #FDEBDF */
   --color-danger: oklch(0.5013 0.1783 28.7); /* #B3261E */
   --color-danger-tint: oklch(0.9464 0.0221 24.4); /* #FCE8E6 */
-  --color-dc: oklch(0.276 0.0233 248.7); /* #1F2933 unused: delete once nothing references it */
 
   /* map and chart roles */
   --color-context: oklch(0.6247 0.0076 247.9); /* #84888C public chargers: 3:1 on surface and on the map's land */

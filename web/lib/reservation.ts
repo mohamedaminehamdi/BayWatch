@@ -20,6 +20,7 @@ import {
   type ReminderKey,
   type ReservationType,
 } from './booking-rules.ts';
+import { fail } from './errors.ts';
 import { distanceM } from './geo.ts';
 import { CHARGE_LABELS, EXTENSION_MIN, EXTENSION_MS, formatEuro, PRICES, total, type Charge } from './pricing.ts';
 import { maskPlate, normalizePlate, samePlate } from './plates.ts';
@@ -28,7 +29,7 @@ export type Status = 'reserved' | 'arrived' | 'charging' | 'completed' | 'cancel
 export type Direction = 'in' | 'out';
 
 export interface Hardware {
-  reserve(): Promise<unknown>;
+  reserve(plates?: string[]): Promise<unknown>; // the booked plate, for the camera's own allow-list (ECURIOUS_WHITELIST=1)
   release(): Promise<unknown>;
 }
 
@@ -65,6 +66,7 @@ export interface Reservation {
   sentReminders: { key: ReminderKey; at: number }[];
   extendedAt?: number;
   unreadableAt?: number; // camera saw a car it couldn't read: the app offers the fallback check-in
+  presenceAt?: number; // the bay's presence sensor saw a car: the same evidence (not wired yet: the hardware integration will set it)
   blockedSince: number | null; // hold is paused while another car stands in the bay
   blockedMs: number;
   arrivedAt?: number;
@@ -81,6 +83,7 @@ type OwnerDetails = Omit<Reservation, 'id' | 'ownerId' | 'plate' | 'extraPlate' 
   plateHint: string | null;
   extraPlateHint: string | null;
   totalCents: number;
+  carAtBay: boolean; // the fallback check-in is open right now (state() only)
 };
 export type ReservationView = { id: string; status: Status; expiresAt: number; end: number; mine: boolean } & Partial<OwnerDetails>;
 export type LogEntry = { at: number; type: string; detail: string };
@@ -89,10 +92,9 @@ export const ACTIVE = new Set<Status>(['reserved', 'arrived', 'charging']);
 const HISTORY_CAP = 300;
 export const PRIORITY_MS = 2 * 60_000;
 export const FALLBACK_RADIUS_M = 150;
+export const FALLBACK_EVIDENCE_MS = 3 * 60_000; // how recently the bay must have seen a car for the fallback check-in
 
-export const fail = (status: number, message: string): never => {
-  throw Object.assign(new Error(message), { status });
-};
+export { fail }; // moved to errors.ts; re-exported for the modules that still import it from here
 
 const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
@@ -152,6 +154,13 @@ export function createReservations({
   const note = (type: string, detail = '') => {
     log.unshift({ at: now(), type, detail });
     log.length = Math.min(log.length, 30);
+  };
+
+  // Hardware evidence that a car is in the bay right now: the camera saw one it couldn't read, or the presence
+  // sensor reported one. The fallback check-in needs it: a driver's reported location alone never lowers the arm.
+  const carAtBay = (r: Reservation) => {
+    const seen = Math.max(r.unreadableAt ?? 0, r.presenceAt ?? 0);
+    return seen > 0 && now() - seen <= FALLBACK_EVIDENCE_MS;
   };
 
   const active = () => (current && ACTIVE.has(current.status) ? current : null);
@@ -272,10 +281,10 @@ export function createReservations({
     addCharge(r, 'reservation', CHARGE_LABELS.reservation(type, q.demand), q.cents);
     current = r;
     try {
-      await hw.reserve();
+      await hw.reserve([plate]);
     } catch (e) {
       current = prev;
-      fail(502, `Reservation hardware did not respond: ${message(e)}`);
+      fail(502, `The bay could not be reserved: ${message(e)}`);
     }
     priority = null;
     if (waitlist.includes(ownerId)) waitlist.splice(waitlist.indexOf(ownerId), 1);
@@ -345,13 +354,25 @@ export function createReservations({
     return { matched: true, matchedBy: match };
   }
 
-  // "I'm at the bay": check in without the camera, from within FALLBACK_RADIUS_M of the bay.
-  // ponytail: browser geolocation can be spoofed; on site, use a code on the hardware display or a QR sticker.
+  // The bay's car sensor: the car left. No plate needed, so it also ends a session checked in by hand.
+  function vacated() {
+    const r = active();
+    if (r && (r.status === 'arrived' || r.status === 'charging')) {
+      chargeOverstay(r);
+      end(r, 'completed');
+      note('completed', 'car left, bay is free');
+    } else if (blocker) unblock('camera');
+  }
+
+  // "I'm at the bay": check in when the camera saw a car but couldn't read its plate. Needs that hardware
+  // evidence from the last FALLBACK_EVIDENCE_MS, and the driver within FALLBACK_RADIUS_M of the bay on top:
+  // browser geolocation can be spoofed, so it's only an extra check.
   async function checkInManually(ownerId: string, pos: { lat?: unknown; lng?: unknown }) {
     const r = own(ownerId, 'reserved');
+    if (blocker) fail(409, 'Another car is in the bay');
+    if (!carAtBay(r)) fail(409, 'The bay camera hasn’t seen your car yet. Drive up to the guard, or ask the operator.');
     const here = { lat: Number(pos?.lat), lng: Number(pos?.lng) };
     if (!Number.isFinite(here.lat) || !Number.isFinite(here.lng)) fail(400, 'Your location is needed to check in');
-    if (blocker) fail(409, 'Another car is in the bay');
     if (distanceM(bay, here) > FALLBACK_RADIUS_M) fail(403, `Check in from the bay (within ${FALLBACK_RADIUS_M} m)`);
     r.status = 'arrived';
     await release(() => (r.status = 'reserved'));
@@ -386,7 +407,7 @@ export function createReservations({
     const r = own(ownerId, 'reserved');
     const blocked = r.blockedSince !== null;
     const fee = blocked ? 0 : cancellationFee(r.feeCents, { bookedAt: r.createdAt, start: r.start, cancelledAt: now() });
-    await hw.release();
+    await release(() => {}); // a hardware failure is a 502, and the booking stays as it was
     const back = total(r.charges) - fee;
     if (back > 0) {
       const label = fee ? CHARGE_LABELS.cancelRelease(fee) : blocked ? CHARGE_LABELS.refundBlocked() : CHARGE_LABELS.refundEarly();
@@ -465,8 +486,9 @@ export function createReservations({
   function state(viewerId: string | null = null) {
     const r = current;
     const h = held();
+    const v = r && (ACTIVE.has(r.status) || r.ownerId === viewerId) ? view(r, viewerId) : null;
     return {
-      reservation: r && (ACTIVE.has(r.status) || r.ownerId === viewerId) ? view(r, viewerId) : null,
+      reservation: v?.mine ? { ...v, carAtBay: r!.status === 'reserved' && carAtBay(r!) } : v,
       blockedSince: blocker?.since ?? null,
       waiting: viewerId ? waitlist.includes(viewerId) : false,
       priority: h ? { until: h.until, mine: h.userId === viewerId } : null,
@@ -500,6 +522,7 @@ export function createReservations({
   return {
     reserve,
     plateEvent,
+    vacated,
     checkInManually,
     useOtherPlate,
     extend,
@@ -517,5 +540,6 @@ export function createReservations({
     setSimulated,
     setOccupancy,
     quote,
+    note, // for operator actions outside a booking, like lowering the arm by hand
   };
 }

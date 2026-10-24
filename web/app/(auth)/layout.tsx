@@ -1,7 +1,7 @@
 import { Check } from 'lucide-react';
 import Link from 'next/link';
 import { BaySketch } from '@/components/landing/bay-sketch';
-import { Logo, PoweredByEcurious } from '@/components/ui/logo';
+import { Logo } from '@/components/ui/logo';
 
 const promises = ['A bay held free until you arrive', 'Checked in by the camera, no card or app tap', 'Your plate is deleted after every session'];
 
@@ -10,7 +10,7 @@ export default function AuthLayout({ children }: LayoutProps<'/'>) {
   return (
     <div className="grid min-h-dvh lg:grid-cols-[minmax(0,1fr)_minmax(0,1.1fr)]">
       <aside className="hidden bg-brand-deep p-12 text-on-brand lg:flex lg:flex-col">
-        <Link href="/" aria-label="Ecurious Reserve home" className="self-start rounded-lg">
+        <Link href="/" aria-label="Baywatch home" className="self-start rounded-lg">
           <Logo tone="light" />
         </Link>
         <div className="grid flex-1 place-items-center py-10">
@@ -28,12 +28,11 @@ export default function AuthLayout({ children }: LayoutProps<'/'>) {
               </li>
             ))}
           </ul>
-          <PoweredByEcurious className="mt-10" />
         </div>
       </aside>
 
       <main className="flex flex-col px-5 py-6 sm:px-8">
-        <Link href="/" aria-label="Ecurious Reserve home" className="self-start rounded-lg lg:hidden">
+        <Link href="/" aria-label="Baywatch home" className="self-start rounded-lg lg:hidden">
           <Logo />
         </Link>
         <div className="flex flex-1 items-center justify-center py-10">{children}</div>

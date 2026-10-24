@@ -4,7 +4,9 @@
 
 import {
   cancellationFee,
+  CLASSES,
   FREE_CANCEL_MS,
+  IDLE_GRACE_MS,
   MAX_RESERVATION_CENTS,
   NO_SHOW_PERCENT,
   noShowFee,
@@ -13,6 +15,7 @@ import {
   TYPES,
   type ReservationType,
 } from './booking-rules.ts';
+import type { BayClass, DemandLabel } from './booking-types.ts';
 
 export { FREE_CANCEL_MS, MAX_RESERVATION_CENTS };
 
@@ -21,9 +24,6 @@ export const RESERVATION_FROM_CENTS = Math.min(...Object.values(TYPES).map((t) =
 export const RESERVATION_TO_CENTS = Math.max(...Object.values(TYPES).map((t) => t.baseCents));
 
 export const PRICES = {
-  // the landing page's headline price: a slow (AC) bay at normal demand. A booking's real fee depends on the
-  // bay's type and demand (booking-rules.ts); the landing should move to RESERVATION_FROM/TO_CENTS and feeRules()
-  reservation: RESERVATION_FROM_CENTS,
   extension: 50, // "Running late": +5 min on the arrival deadline, once per booking
   bayGuardPerBayMonth: 1900, // CPO plan: blocked-bay alerts + dashboard
 };
@@ -32,9 +32,10 @@ export const EXTENSION_MS = 5 * 60_000;
 export const CPO_SHARE = 0.7; // of reservation revenue; the platform keeps the rest
 export const BLOCKED_DC_HOUR_MARGIN = 1200; // estimate: CPO margin lost per hour a DC bay is blocked, for the Bay Guard pitch
 
-export type Charge = { kind: 'reservation' | 'extension' | 'overstay' | 'refund' | 'released'; label: string; cents: number; at: number };
+// v1 and v2 receipt lines ('extension' is v1 only, 'credit' v2 only; v2's own type is in booking-types.ts)
+export type Charge = { kind: 'reservation' | 'extension' | 'overstay' | 'refund' | 'released' | 'credit'; label: string; cents: number; at: number };
 
-export const total = (charges: Charge[]) => charges.reduce((sum, c) => sum + c.cents, 0);
+export const total = (charges: { cents: number }[]) => charges.reduce((sum, c) => sum + c.cents, 0);
 
 const euro = new Intl.NumberFormat('en-IE', { style: 'currency', currency: 'EUR' });
 const wholeEuro = new Intl.NumberFormat('en-IE', { style: 'currency', currency: 'EUR', maximumFractionDigits: 0 });
@@ -44,6 +45,19 @@ export const formatEuro = (cents: number) => (cents % 100 ? euro : wholeEuro).fo
 export const FREE_CANCEL_MIN = Math.round(FREE_CANCEL_MS / 60_000);
 export const EXTENSION_MIN = Math.round(EXTENSION_MS / 60_000);
 const OVERSTAY_GRACE_MIN = Math.round(OVERSTAY_GRACE_MS / 60_000);
+const IDLE_GRACE_MIN = Math.round(IDLE_GRACE_MS / 60_000);
+
+// Booking v2 receipt lines
+export const RECEIPT = {
+  fee: (cls: BayClass, demand: DemandLabel) => `Reservation · ${CLASSES[cls].label} · ${demand.toLowerCase()} demand`,
+  firstFree: () => 'Free first reservation',
+  credit: () => 'Credit used',
+  refundEarly: () => `Refund: cancelled within ${FREE_CANCEL_MIN} min of booking`,
+  refundAhead: () => 'Refund: cancelled a day or more ahead',
+  refundBlocked: () => 'Refund: the bay was blocked',
+  cancelRelease: (feeCents: number) => `Cancelled: returned, less the ${formatEuro(feeCents)} cancellation fee`,
+  idle: (minutes: number) => `Idle fee: ${minutes} min after the ${IDLE_GRACE_MIN} free minutes`,
+};
 
 // Receipt lines, shared by real bookings and the simulated week
 export const CHARGE_LABELS = {

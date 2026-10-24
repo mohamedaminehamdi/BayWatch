@@ -1,46 +1,43 @@
 # Data flows
 
-_Last updated: 2026-10-24. Fees follow [booking-rules.ts](../web/lib/booking-rules.ts). The duration picker and demand control are still being wired into the UI. The partner flow is in progress._
+_Last updated: 2026-10-24, booking v2. The engine is [schedule.ts](../web/lib/schedule.ts), with a tick every 5 s ([server.ts](../web/lib/server.ts)). Fees come from [booking-rules.ts](../web/lib/booking-rules.ts), and the lock calls go through [ecurious.ts](../web/lib/ecurious.ts)._
 
-Participants used below:
+Participants below:
 - **Driver:** the web app.
-- **API:** Next.js route handlers.
-- **Engine:** [reservation.ts](../web/lib/reservation.ts).
-- **HW:** the Ecurious adapter, a mock today.
-- **Camera:** the bay camera via the Ecurious server webhook.
+- **Engine:** the schedule.
+- **Lock:** the Ecurious adapter, in live mode. A simulated bay keeps the same states in memory, with no calls.
+- **Bridge:** the live event stream → the engine ([ecurious-bridge.ts](../web/lib/ecurious-bridge.ts)).
 
-## 1. Reserve → arrive → charge → release
+## 1. Book → arrive → charge → leave (a bay with a real lock)
 
 ```mermaid
 sequenceDiagram
   autonumber
   actor D as Driver
   participant API
-  participant C as Clerk
   participant E as Engine
-  participant HW
-  participant CAM as Camera
-  D->>API: POST /api/reservations {vehicleId, payment demo}
-  API->>C: load the driver's car (privateMetadata)
-  API->>E: reserve(ownerId, plate, label, duration)
-  E->>E: quote: fee by type and demand, reliability check
-  E->>HW: reserve() · guard up
-  E-->>D: reserved · arrive by start + 15 min · receipt line
-  loop every 2 s
-    D->>API: GET /api/state
-  end
-  CAM->>API: POST /api/plate-events {plate, in} + secret
-  API->>E: plateEvent(plate, in)
-  E->>E: samePlate(read, booked) gives exact or fuzzy
-  E->>HW: release() · guard down
+  participant L as Lock (Ecurious)
+  participant BR as Bridge
+  D->>API: GET /api/bays/bw-1/quote?start&blocks
+  API-->>D: fee (€5 × class × demand, cap €10) · credit used · cancel schedule
+  D->>API: POST /api/reservations {bayId, start, blocks, vehicleId, priceCents, acceptFees}
+  API->>E: book: grid, gap, 60 days, 3 upcoming, price unchanged? · payment decided server-side
+  E-->>D: upcoming
+  Note over E: tick every 5 s
+  E->>L: start − 10 min (at once for a slot starting sooner): bay online and vacant? · lock {cancelAutoLift} · whitelist [booked plate]
+  Note over E,D: start − 30 min: live (card, banner, reminder)
+  BR->>E: lock:photo_captured (booked plate) · camera lowers the arm itself (whitelist)
+  E->>L: unlock {cancelAutoLift} if still up · whitelist cleared
   E-->>D: arrived (camera)
-  D->>API: POST /api/reservation/charge
-  D->>API: POST /api/reservation/finish
-  Note over E: or the camera sees the car leave (out)
-  E->>E: overstay fee if past end + 15 min · plates erased · into history
+  D->>API: POST …/charge, then …/finish
+  BR->>E: lock:car_presence_changed vacant for 10 s · car left
+  E->>E: idle fee after 5 free min (€0.30/min, cap €12) · plate erased · history
+  E->>L: lock {cancelAutoLift} · the arm is up again between sessions
 ```
 
-If `hw.reserve()` fails, the reservation is rolled back (502). If `hw.release()` fails, the state is restored and the driver sees an error.
+- **A refused raise** (a car over the arm, an offline bay) at booking time rolls the booking back: 502 `The bay could not be reserved: <reason>`.
+- **Before the start:** reminders at the day before (if booked > 1 day ahead), start − 30 min and start − 5 min.
+- **During the session:** reminders at end − 5 min, at the end and at end + 5 min. Each is re-checked when sent.
 
 ## 2. Misread or unreadable plate, and the fallback check-in
 
@@ -49,145 +46,147 @@ sequenceDiagram
   autonumber
   actor D as Driver
   participant E as Engine
-  participant CAM as Camera
-  CAM->>E: plateEvent("MA81234", in)
-  E->>E: not exact · same after confusables (B→8) · match is fuzzy
-  E-->>D: checked in (camera, misread tolerated)
-  CAM->>E: plateEvent("", in) · car seen, plate unreadable
-  E-->>D: unreadableAt set · app offers "I'm at the bay"
-  D->>E: POST checkin {lat, lng}
-  E->>E: within 150 m of the bay and no other car in it?
+  participant BR as Bridge
+  BR->>E: photo_captured "MA81234" · not exact, confusables match (B→8) · fuzzy
+  E-->>D: arrived (camera, misread tolerated)
+  BR->>E: car_presence_changed occupied, no readable plate
+  E-->>D: carAtBay · "I'm at the bay" offered
+  D->>E: POST …/checkin {lat, lng}
+  E->>E: camera or sensor saw a car in the last 3 min? · within 150 m?
   E-->>D: arrived (fallback) · coordinates not stored
 ```
 
-Matching ([plates.ts](../web/lib/plates.ts)):
-1. Exact match after normalising.
-2. Otherwise, canonical confusable characters: O/Q/D→0, I→1, B→8, S→5, Z→2, G→6.
-3. Otherwise, at most one edit for plates of 6 or more characters.
+A driver's location alone never lowers an arm. If the camera lowered the arm by itself for a car whose plate we couldn't read, the engine checks the booking in only while the camera's list is confirmed to hold just that booking's plates; otherwise the driver gets "I'm at the bay".
 
-It's only ever compared against the one active booking, plus its optional "different car today" plate.
-
-## 3. Blocked bay → alert → email → resolve
+## 3. Blocked bay → re-route + €5 credit
 
 ```mermaid
 sequenceDiagram
   autonumber
-  actor D as Driver (reserved)
+  actor D as Driver (booked)
   participant E as Engine
-  participant CAM as Camera
   participant M as Resend
   actor O as Operator
-  CAM->>E: plateEvent("BXY987", in) · not the booked car
-  E->>E: blocker set · hold paused (blockedSince) · alert opened with plate
-  E->>M: email to OPERATOR_EMAILS, without the plate
-  M-->>E: emailStatus sent, failed or skipped
-  E-->>D: "Another car is in your bay" · timer paused · free cancel · nearest chargers
-  O->>E: GET /api/operator · sees alert, plate, email status
-  alt the car leaves
-    CAM->>E: plateEvent("BXY987", out)
-  else operator clears it
-    O->>E: POST /api/operator/alerts/{id}/resolve
-  end
-  E->>E: expiresAt += paused time · alert resolved · plate erased
-  E-->>D: hold resumes
+  Note over E: from start − 10 min, every tick
+  E->>E: bay occupied by another car (real sensor, or demo "car in bay") · blockedSince
+  E-->>D: "Your bay is occupied" · nearest free bays: Book instead, Navigate · free cancel
+  E->>E: €5 credit to the driver's wallet, once per booking
+  E->>M: operator alert email (real bays), without the plate
+  O->>E: sees the alert, resolves it, or the car leaves
+  E->>E: if before the arrival deadline: booking continues · deadline + blocked time
 ```
 
-With no booking, a car parking in the bay just marks it occupied. That's normal charging, so it raises no alert, and new reservations are refused until the car leaves.
-
-## 4. No-show expiry and fees
+## 4. Walk-up ("Unlock now")
 
 ```mermaid
 sequenceDiagram
   autonumber
-  participant T as Timer (5 s)
+  actor D as Driver at the bay
   participant E as Engine
-  participant HW
-  T->>E: expire()
-  E->>E: reserved, not blocked, now > expiresAt?
-  E->>HW: release()
-  alt normal driver
-    E->>E: refund line: 50% of the fee returned
-  else prepaid (3 no-shows in last 10 bookings)
-    E->>E: whole fee kept
-  end
-  E->>E: status no_show · plates erased · waitlist offered the bay
+  participant L as Lock
+  D->>E: POST /api/bays/{id}/unlock {lat, lng}
+  E->>E: free, no booking within 30 min + gap? · within 150 m?
+  E->>E: real lock: camera read one of the driver's own plates in the last 3 min? (403 otherwise)
+  E->>L: unlock {cancelAutoLift}
+  E-->>D: walkup · free until the next booking's start − gap
+  Note over E: reminders and the idle fee apply · car leaves · arm up again
 ```
 
-## 5. Waitlist and priority
+## 5. No-show
 
-```mermaid
-sequenceDiagram
-  autonumber
-  actor A as Driver A (booked)
-  actor B as Driver B
-  participant E as Engine
-  B->>E: POST /api/waitlist (bay busy)
-  E-->>B: position 1
-  A->>E: finish, cancel or no-show
-  E->>E: priority = {B, now + 2 min}
-  E-->>B: "The bay is held for you to book" banner
-  Note over E: others get 409 "Held for a waiting driver" until it expires, then the next driver in line gets it
-```
+- **The deadline:** start + 15 min, moved by any blocked time.
+- **When it passes:** the driver pays **100%** of the fee, the booking becomes `no_show`, the plate is erased, and a real arm goes back up for the next driver.
 
-## 6. Fee and pricing calculation
+## 6. Fee calculation
 
 ```mermaid
 flowchart TD
-  A["Bay power ≥ 50 kW?"] -->|yes| F["fast · base €2.50 · max 2 h"]
-  A -->|no| S["slow · base €1.50 · max 4 h"]
-  F --> M
-  S --> M
-  M["Demand multiplier by occupancy<br/>under 30% quiet 0.8× · 30–70% normal 1.0×<br/>70–90% busy 1.5× · 90% or more peak 2.0×<br/>no data = normal"] --> CAP["min(fee, €4.00 cap)"]
-  CAP --> R{"3+ no-shows in last 10<br/>(90 days)?"}
-  R -->|yes| P["prepaid: no-show keeps 100%"]
-  R -->|no| N["no-show keeps 50%"]
+  P["Bay power"] -->|"< 50 kW"| S["slow · ×0.5 · up to 4 h"]
+  P -->|"50–299 kW"| F["fast · ×1 · up to 2 h"]
+  P -->|"≥ 300 kW"| U["ultra · ×1.5 · up to 1 h"]
+  S --> D
+  F --> D
+  U --> D
+  D["Demand at the start, Europe/Berlin<br/>weekdays 17–19 h busy ×1.5 · 22–06 h quiet ×0.8<br/>HOLIDAYS busy · demo override (Peak ×2)"] --> C["€5 × class × demand · cap €10"]
+  C --> W["minus credit: €5 blocked-bay credits, or a free first reservation"]
 ```
 
-- **Cancellation:**
-  - Free within 2 min of booking, or while the bay is blocked.
-  - Otherwise a share of the no-show fee by lead time to the start: ≥24 h 0%, ≥2 h 30%, ≥10 min 40%, later 60%.
-  - With "reserve now" the start is the booking time, so after 2 minutes it's always 60%.
-- **Extension:** +5 min for €0.50, once.
-- **Overstay:** 15 min free after the session end, then €0.25/min (fast) or €0.10/min (slow), capped at €12.
-- The fee is fixed when booking. If demand changed since the driver saw the price, the engine answers 409 "the price is now €X" and they confirm again.
+- **Fixed at booking.** A different quote at Pay time is a 409, "The price is now €X".
+- **Table by class and demand:** [reservation-model.md](reservation-model.md#fees-by-class-and-demand).
 
-## 7. Operator KPIs
-
-```mermaid
-flowchart LR
-  H["history (≤300) + current reservation<br/>+ alerts (≤100)"] --> W["weekStats: last 7 Berlin calendar days"]
-  W --> K["reservations · completion rate · no-show rate · time to arrive<br/>blocked incidents and minutes · camera vs fallback · fuzzy matches<br/>revenue and 70% CPO share"]
-  SIM["Simulate a week (SIMULATOR=1)<br/>seeded, labelled simulated"] --> H
-```
-
-## 8. Partner app reservation (OCPI-style, in progress)
+## 7. Voice booking
 
 ```mermaid
 sequenceDiagram
   autonumber
-  participant P as Partner app (eMSP)
-  participant API
+  actor D as Driver (mic in the app)
+  participant APP as App
+  participant V as Vapi
+  participant API as /api/voice/vapi
   participant E as Engine
-  participant CAM as Camera
-  P->>API: POST /ocpi/2.2.1/commands/RESERVE_NOW + Token · ecurious_license_plate
-  API->>E: reserve(owner partner:name:uid, plate, …)
-  API-->>P: OCPI envelope · result ACCEPTED or REJECTED
-  P->>API: poll the reservation status (token-protected)
-  CAM->>API: plate event · the partner's driver is recognised by plate
+  APP->>APP: POST /api/voice/session · 15-min token (VOICE_SESSION_SECRET)
+  D->>V: "Book bay 1 now for an hour"
+  V->>API: quote_reservation + Bearer VAPI_BEARER_SECRET + token in metadata
+  API-->>V: the quote, read back to the driver
+  D->>V: "Yes"
+  V->>API: confirm_reservation (same quote twice = same booking)
+  API->>E: reserve for the driver named in the token · demo payment
+  E-->>V: booked · "now" can raise a real arm
 ```
 
-Details and examples: [api.md](api.md).
+- **Phone calls** ("Hey Siri, call Baywatch") book for `VOICE_DEMO_USER_ID`, or are sent to the app.
+- **Plates** never go to the voice model.
+- **Details:** [voice-booking.md](voice-booking.md).
+
+## 8. Partner app reservation
+
+A partner sends `RESERVE_NOW` with `location_id` = bay id, the plate and consent, an optional `ecurious_start` and `ecurious_blocks`, and the fee its driver accepted. The answer is final (ACCEPTED, or REJECTED with the reason, including hardware refusals), and the partner polls the status route. The driver checks in by plate like any other. See [api.md](api.md).
+
+## 9. Hardware events
+
+| Event (live server) | Bridge → engine |
+|---|---|
+| `lock:photo_captured` | A plate read: the booked car checks in, or another car blocks the bay. On a free bay it's kept for 3 min as walk-up evidence. |
+| `lock:car_presence_changed` occupied | Car in the bay: check-in evidence, or a blocker |
+| `lock:car_presence_changed` vacant for 10 s | The car left: the session ends with any idle fee, and the arm goes up again |
+| `lock:status_changed` | Arm position, for the cached status |
+| `lock:heartbeat` | Health and battery |
+
+The documented names were `status_change` and `vehicle_presence`. The live server sends the `_changed` forms, which the parser has handled since 2026-10-24 ([what-did-not-work](what-did-not-work.md)).
+
+## 10. The Flutter app: sign-in and API calls
+
+```mermaid
+sequenceDiagram
+  autonumber
+  actor D as Driver
+  participant A as Flutter app
+  participant S as Next.js server
+  participant C as Clerk
+  A->>S: GET /api/config
+  S-->>A: clerkPublishableKey, vapi (NEXT_PUBLIC_* only)
+  D->>A: email + password, or a code by email
+  A->>C: sign in (phones: clerk_auth native mode · web: clerk-js via web/clerk_bridge.js)
+  C-->>A: session (+ a code by email on a new device)
+  A->>C: session token (JWT, ~60 s, refreshed)
+  A->>S: GET /api/state, POST /api/reservations … with Authorization: Bearer <jwt>
+  S->>S: auth() verifies the JWT like the web's cookie
+  S-->>A: the same JSON as the web
+```
+
+The app shows exactly what the web does; there is no second backend. Clerk refuses a browser request that carries both `Origin` and `Authorization`, which is why the web build signs in through clerk-js.
 
 ## Personal data
 
 | Data | Stored where | Who sees it | Erased when |
 |---|---|---|---|
-| Driver's cars (plate, nickname, consent time) | Clerk `privateMetadata`, server-only | The driver only | When the driver deletes the car or the account |
-| Booked plate (and "different car" plate) | The engine, in memory | The owner as `MA•••34` only. The camera matching runs server-side. | **When the reservation ends**, for every outcome |
-| Blocking car's plate | The alert, in memory | Operators only. Never in emails or the event log. | When the alert is resolved (by camera or operator) |
-| Fallback-check-in location | Not stored | – | Used once for the 150 m check |
-| Booking outcomes (status, times, fees) | History, in memory, capped at 300 | The owner. Operators as aggregates. | On restart. The reliability rule only looks back 90 days. |
-| Event log | In memory, last 30 | Shown in the demo panel and the operator view | Rolling. Never contains plates or identities. |
-| Clerk identity (email, name) | Clerk | The driver. The server checks operator emails. | Clerk account deletion |
-
-Clerk is a US processor, so GDPR relies on its data processing agreement and standard contractual clauses. Partner apps collect their drivers' consent and need a data processing agreement with us ([api.md](api.md)).
+| Drivers' cars (plate, nickname, consent time) | Clerk `privateMetadata` | The driver only | When the car or account is deleted |
+| Credit wallet (`creditCents`, `firstFree`) | Clerk `privateMetadata` | The driver | With the account |
+| Booked plate (and "different car" plate) | The engine, in memory | The owner, masked | **When the booking ends** |
+| Booked plate on the camera's own list | The vendor's camera | The camera | Cleared at the end of the booking |
+| Camera reads (walk-up evidence) | In memory, at most 3 min | Nobody | After 3 min |
+| Blocking car's plate | The alert, in memory | Operators only, never emailed | On resolve |
+| Locations (check-in, walk-up) | Not stored | – | Used once for the 150 m check |
+| The app's Clerk session (Flutter) | On the phone (shared_preferences), or in the browser's storage via clerk-js | The driver | On sign-out |
+| Voice calls | Vapi | – | Plates are never sent to the voice model |
+| Booking outcomes | In memory | The owner; operators as aggregates | On restart |

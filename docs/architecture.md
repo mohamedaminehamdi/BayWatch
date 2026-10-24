@@ -1,6 +1,6 @@
 # Architecture
 
-_Last updated: 2026-10-24. Covers the driver view, operator dashboard and booking rules. Still in progress: wiring the new fee rules into the UI, the partner API and the Ecurious brand retheme._
+_Last updated: 2026-10-24, booking v2. Product name **Baywatch** (internals and the hardware vendor keep "Ecurious")._
 
 ## Components
 
@@ -8,87 +8,82 @@ _Last updated: 2026-10-24. Covers the driver view, operator dashboard and bookin
 flowchart LR
   subgraph clients["Clients"]
     WEB["Web app / PWA<br/>Next.js pages"]
-    FL["Flutter app<br/>mobile/ · Chrome only"]
-    PARTNER["Other charging apps<br/>OCPI-style API · in progress"]
+    MIC["In-app mic<br/>Vapi"]
+    PARTNER["Other charging apps<br/>OCPI-style commands"]
+    FL["Flutter app<br/>web, Android, iOS"]
   end
   subgraph server["Next.js server · web/"]
     API["Route handlers<br/>app/api/*"]
-    RES["Reservation engine<br/>lib/reservation.ts"]
-    RULES["Booking rules + prices<br/>lib/booking-rules.ts · lib/pricing.ts"]
-    ADP["Ecurious adapter<br/>lib/ecurious.ts · mock"]
-    GEP["GoingElectric proxy<br/>lib/goingelectric.ts"]
-    MAIL["Alert email<br/>lib/notify.ts"]
+    VAPI["Voice webhook<br/>app/api/voice/*"]
+    PAPI["Partner API<br/>app/ocpi/* · lib/partners.ts"]
+    BOOK["Booking service<br/>lib/booking-api.ts"]
+    ENG["Schedule engine<br/>lib/schedule.ts · tick 5 s"]
+    RULES["Rules<br/>lib/booking-rules.ts"]
+    ADP["Ecurious adapter<br/>lib/ecurious.ts"]
+    BR["Event bridge<br/>lib/ecurious-bridge.ts"]
   end
-  WEB --> API
-  FL --> API
-  PARTNER -.-> API
-  API --> RES --> RULES
-  RES --> ADP
-  ADP -.->|on site| ECU[("Ecurious server<br/>bay hardware + camera")]
-  ECU -.->|plate events · webhook| API
-  API --> GEP --> GE[("GoingElectric API")]
-  RES --> MAIL --> RESEND[("Resend email API")]
-  API --> CLERK[("Clerk<br/>auth + driver cars")]
-  WEB --> OFM[("OpenFreeMap tiles")]
-  WEB --> NOM[("Nominatim place search")]
+  WEB --> API --> BOOK --> ENG --> RULES
+  MIC --> VOICEAI[("Vapi")] -->|Bearer| VAPI --> BOOK
+  PARTNER -->|Token| PAPI --> ENG
+  FL -->|Clerk Bearer token| API
+  ENG --> ADP -->|REST · X-API-Key| ECU[("Ecurious server<br/>lock-0002, lock-0003")]
+  ECU -->|SSE events| BR --> ENG
+  API --> GE[("GoingElectric")]
+  API --> CLERK[("Clerk<br/>auth, cars, credit wallet")]
+  ENG --> RESEND[("Resend")]
+  API -.->|not wired into v2| STRIPE[("Stripe test mode")]
 ```
 
 | Component | Role | Status |
 |---|---|---|
-| **Next.js 16 app** ([web/](../web/)) | Landing page, the driver app, the operator dashboard **and** the API. One backend for every client. | Built |
-| **Flutter app** ([mobile/](../mobile/)) | Mobile client for the same API, with a map and bay status. | Legacy: it predates sign-in and can't reserve until it gets Clerk ([limitations](limitations-and-scaling.md)) |
-| **Clerk** | Sign-in (Google and email). Stores drivers' cars in private, server-only user metadata. | Built. The app is temporary until claimed |
-| **GoingElectric** | Public charge points for the map, the list and the landing page. The key stays on the server. | Built, with live data |
-| **Ecurious server** | Reserves and releases the bay, reads its status, and sends camera plate events. | **Mocked** in [lib/ecurious.ts](../web/lib/ecurious.ts). We get the real API on site |
-| **Resend** | Emails operators when a bay is blocked. | Built. Skipped without `RESEND_API_KEY` |
-| **OpenFreeMap + MapLibre** | Vector map tiles, with no key needed. | Built |
-| **Nominatim** | Place search in Explore, on submit only. | Built |
-| **Partner API** | OCPI-style `RESERVE_NOW` / `CANCEL_RESERVATION` for other apps ([api.md](api.md)). | In progress |
+| **Next.js 16 app** ([web/](../web/)) | Landing, the driver app, the operator dashboard, and the API | Built |
+| **Schedule engine** ([schedule.ts](../web/lib/schedule.ts)) | Every bay's bookings on the 15-min grid: quote, book, cancel, check-in, walk-up, no-show, blocked bays, credits, reminders, hardware sync. A 5 s tick. | Built |
+| **Bays** ([bays.ts](../web/lib/bays.ts)) | The three Baywatch bays from `ECURIOUS_BAYS` (`bw-1` → `lock-0002`, `bw-2` → `lock-0003`, `bw-3` no lock), and every GoingElectric charger as `ge-<id>` with a simulated guard | Built |
+| **Ecurious locks** | Two real CC5S ground locks with a camera, via REST and an SSE event stream | Live: the dev server runs with `ECURIOUS_LIVE=1` ([hardware-integration.md](hardware-integration.md)) |
+| **Clerk** | Sign-in. Drivers' cars and the credit wallet live in `privateMetadata`. | Built. Temporary app until claimed |
+| **GoingElectric** | Public chargers, every one bookable | Built |
+| **Vapi** | Voice booking (quote, then confirm) | Built, behind `VOICE_DEMO=1` ([voice-booking.md](voice-booking.md)) |
+| **Stripe** | Card holds and capture, test mode | Built and tested, **not yet wired into v2** ([payments.md](payments.md)) |
+| **Resend** | Blocked-bay alert emails | Built |
+| **OpenFreeMap + MapLibre, Nominatim** | Map and place search | Built |
+| **Flutter** ([mobile/](../mobile/)) | The native app: a port of every web screen (landing, sign-in, explore, booking, bookings, cars, operator, demo, voice) on the same API, signed in with the same Clerk accounts through a Bearer session token | Built. Tested in Chrome; Android and iOS builds not yet run ([mobile/README.md](../mobile/README.md)) |
 
 ## Module map (`web/lib`)
 
 | Module | What it does |
 |---|---|
-| [reservation.ts](../web/lib/reservation.ts) | The engine. One bay with one active reservation: reserve, camera plate events, fallback check-in, a second plate, extension, cancel, charge, finish, the no-show timer, waitlist and priority, blocked-bay alerts, the public, owner and operator views, booking history, and analytics records. |
-| [booking-rules.ts](../web/lib/booking-rules.ts) | Pure rules, no imports: slot limits by type, the demand-priced fee with a cap, the no-show fee, cancellation tiers, the arrival deadline, overstay, the reliability (repeat no-show) rule, and the reminder schedule. The sources for every number are in [reservation-model.md](reservation-model.md). |
-| [pricing.ts](../web/lib/pricing.ts) | The app's own prices (extension, the Bay Guard plan, the 70% CPO share), receipt labels, and the fee sentences drivers read before paying. |
-| [plates.ts](../web/lib/plates.ts) | Plate normalising, masking (`MA•••34`), and misread-tolerant matching. |
-| [geo.ts](../web/lib/geo.ts) | Distance in metres (haversine), formatting, and the Google Maps directions link. |
-| [server.ts](../web/lib/server.ts) | Config from env, the shared engine instance plus the 5 s timer, the auth helpers (`requireUser`, `requireOperator`), the webhook secret check, the JSON body reader with a 10 KB limit, and the `handle()` error-to-JSON wrapper. |
-| [vehicles.ts](../web/lib/vehicles.ts) | Drivers' cars in Clerk `privateMetadata`, with validation, a consent timestamp and a maximum of 5. |
-| [goingelectric.ts](../web/lib/goingelectric.ts) | GoingElectric queries: map-area search, and the cached "chargers near the bay" for the landing page. |
-| [notify.ts](../web/lib/notify.ts) | The blocked-bay email through Resend's REST API. It never throws and never includes a plate. |
-| [operator.ts](../web/lib/operator.ts) | 7-day KPIs in Berlin calendar days, and a seeded "Simulate a week" generator for demos. |
-| [ecurious.ts](../web/lib/ecurious.ts) | The hardware adapter: `reserve()`, `release()`, `status()`. A mock today. |
-
-The UI lives in [web/components](../web/components/): `explore/`, `booking/`, `bookings/`, `vehicles/`, `operator/`, `landing/`, `ui/` and `demo-panel.tsx`. Pages are in [web/app](../web/app/): `(marketing)` is the landing page, `(auth)` the sign-in and sign-up pages, and `(app)` the signed-in app.
+| [booking-types.ts](../web/lib/booking-types.ts) | The shared v2 types: `Bay`, `Availability`, `Quote`, `ReservationView`, charges, reminders |
+| [booking-rules.ts](../web/lib/booking-rules.ts) | Pure rules: classes, demand by time, the grid, gaps, fees, the cancel schedule, idle fees, the six reminders. The v1 section at the end is deprecated. |
+| [schedule.ts](../web/lib/schedule.ts) | The engine (see above), including `bayView`, availability, the walk-up and fallback evidence rules, credits and `firstFree` |
+| [booking-api.ts](../web/lib/booking-api.ts) | Booking for server code: the same checks for the web, voice and partners. **Payment is decided here**, never from a browser field. |
+| [booking.ts](../web/lib/booking.ts) | That service bound to the server's engine (`bays`, `quote`, `reserve`, `reserveFromWeb`) |
+| [bays.ts](../web/lib/bays.ts) | Bay config: the Baywatch bays and GoingElectric bays. `lock-0001` is retired. |
+| [ecurious.ts](../web/lib/ecurious.ts) | The lock adapter, per `lockId`: `raise` (whitelist the booked plate, never `wildcard`), `lower`, `status`, validating against `GET /locks`. Safety rules: never raise onto a car, refuse offline bays, a 30 s cooldown, no write retries. |
+| [ecurious-events.ts](../web/lib/ecurious-events.ts), [ecurious-bridge.ts](../web/lib/ecurious-bridge.ts) | SSE client with the live event names (`lock:status_changed`, `lock:car_presence_changed`, `lock:photo_captured`), and events → engine |
+| [partners.ts](../web/lib/partners.ts) | The OCPI-style partner API |
+| [voice.ts](../web/lib/voice.ts) | Voice tools: `quote_reservation` / `confirm_reservation`, signed session tokens, bearer check |
+| [payments.ts](../web/lib/payments.ts), [revenue.ts](../web/lib/revenue.ts) | Stripe test-mode holds and capture; who gets what from a booking ([unit-economics.md](unit-economics.md)) |
+| [legacy.ts](../web/lib/legacy.ts) | The old screens' view of v2 (deprecated) |
+| [server.ts](../web/lib/server.ts) | Config, auth helpers, the engine singleton and its 5 s tick, the webhook secret check, the JSON body limit |
+| [operator.ts](../web/lib/operator.ts), [notify.ts](../web/lib/notify.ts), [plates.ts](../web/lib/plates.ts), [vehicles.ts](../web/lib/vehicles.ts), [goingelectric.ts](../web/lib/goingelectric.ts), [geo.ts](../web/lib/geo.ts) | KPIs and the hardware panel; alert email; plate matching; cars; GoingElectric; distance |
 
 ## State and persistence
 
-- **Everything is in memory, in one process.** The engine is a singleton on `globalThis`, so dev reloads keep it ([server.ts](../web/lib/server.ts)). It needs one long-running `next start`. Serverless hosting such as Vercel would give each instance its own state.
-- **What's held:**
-  - the current reservation;
-  - up to 300 ended reservations, with plates erased;
-  - up to 100 alerts (150 including simulated ones);
-  - a 30-line event log with no plates;
-  - the waitlist, the priority window and the demand setting.
-- A restart loses all of the above. **Drivers' cars survive**, because they're stored in Clerk.
-- A 5-second timer (`expire`) handles no-shows, due reminders and expired priority windows.
-- The browser polls `GET /api/state` every 2 s. The operator dashboard polls every 3 s.
+- **In memory, in one process:** every bay's schedule, booking history, alerts and the event log. A restart loses bookings, but not cars or credits (Clerk). It needs one long-running `next start`.
+- **Shared on `globalThis`:** the engine, the hardware cache and the bridge, because instrumentation and the route handlers are bundled separately.
+- **Polling:** the browser polls the API. Hardware status is cached for 5 s per lock.
 
 ## Security
 
-| Concern | How it's handled | Where |
-|---|---|---|
-| Who is the driver | Clerk session. `requireUser()` returns 401 when signed out. The `(app)` pages call `auth.protect()`. | [server.ts](../web/lib/server.ts), [(app)/layout.tsx](../web/app/%28app%29/layout.tsx) |
-| Whose reservation | `ownerId` = the Clerk user id, checked on every action (403 otherwise). It's never sent to any client. | `own()` in [reservation.ts](../web/lib/reservation.ts) |
-| Plate source | Reserving takes a `vehicleId` from the driver's own account, never a free-text plate. | [api/reservations](../web/app/api/reservations/route.ts) |
-| Camera webhook | `x-webhook-secret`, compared in constant time. **Fails closed** when `WEBHOOK_SECRET` is unset, because a matching plate opens the bay. | `secretOk()` in [server.ts](../web/lib/server.ts) |
-| Demo controls | `/api/sim/*` and "Simulate a week" exist only with `SIMULATOR=1`, and also need sign-in. Never enable this next to real hardware. | [api/sim](../web/app/api/sim/plate-events/route.ts) |
-| Operators | An email allowlist in `OPERATOR_EMAILS`: the API returns 403, and `/operator` returns 404 for anyone else. | `requireOperator()` |
-| Partner apps | `Authorization: Token …` from `OCPI_PARTNER_TOKENS`, constant-time and failing closed. No calls to partner-supplied URLs (SSRF). | In progress, see [api.md](api.md) |
-| Input limits | JSON bodies capped at 10 KB (413), invalid JSON returns 400, and coordinates and plates are validated. | `body()` |
-| CORS | `/api/*` allows any origin for the Flutter web client. Sessions are cookies, which aren't sent cross-origin, and the Flutter app will use Bearer tokens. | [next.config.ts](../web/next.config.ts) |
-| Secrets | `GE_API_KEY`, the Clerk keys, `RESEND_API_KEY`, `ECURIOUS_API_KEY` and `WEBHOOK_SECRET` live only in `web/.env*` (gitignored). The GoingElectric key never reaches the browser. | [.env.example](../web/.env.example) |
-
-Personal data and when it's erased: see [data-flows.md](data-flows.md#personal-data).
+| Concern | How it's handled |
+|---|---|
+| Who the driver is | Clerk session: the web's cookie, or the Flutter app's session JWT as `Authorization: Bearer`. Pages call `auth.protect()`, and routes return 401 when signed out. `GET /api/config` hands the app only `NEXT_PUBLIC_*` values. |
+| Whose booking | Owner checks on every booking route. Anyone else's booking is a 404. |
+| Payment | Decided on the server ([booking-api.ts](../web/lib/booking-api.ts)): the browser's `payment` field is ignored. The demo payment is allowed only without Stripe keys, or with `VOICE_DEMO=1` for voice. |
+| Opening an arm | A plate match (the camera's whitelist or our misread-tolerant match). The fallback check-in needs camera or sensor evidence in the last 3 min, plus 150 m. Walk-up on a real lock needs the camera to read **one of the driver's own plates**. When the camera lowers the arm by itself for a plate we couldn't read, it counts as the booked car only while the camera's list is **confirmed** to hold just that booking's plates (`listOk === true`); an unknown or 'any car' list proves nothing, and the driver uses "I'm at the bay". Location alone never lowers an arm. |
+| Demo events | `SIMULATOR=1` routes are refused (403) on bays with a real lock. They only listen to their own camera and sensor. |
+| Hardware | Live only with the key and `ECURIOUS_LIVE=1` (`ECURIOUS_MOCK=1` is the kill switch). Only the team's locks, validated against `GET /locks`; `lock-0001` is never called. |
+| Voice | The Vapi webhook needs `VAPI_BEARER_SECRET`. The driver comes from a token signed with its own `VOICE_SESSION_SECRET`, never from the caller or the model. **Open:** phone calls carry no token and book as `VOICE_DEMO_USER_ID` when it's set (it isn't by default), so anyone with the number could book, a "now" booking included ([limitations](limitations-and-scaling.md)). |
+| Partners | `Authorization: Token`, constant-time and failing closed. 60 requests a minute. Partner URLs are never called. |
+| Camera webhook | `x-webhook-secret`, failing closed, and refused on real-lock bays |
+| Input and secrets | JSON bodies capped at 10 KB. Keys only in `web/.env*` (gitignored). |

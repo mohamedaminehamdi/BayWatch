@@ -1,7 +1,7 @@
 name: ecurious_reserve
-description: "A new Flutter project."
+description: "Baywatch: book a public EV charger, and the bay is kept free until you arrive. The native app for the API in web/."
 publish_to: 'none'
-version: 0.1.0+1
+version: 0.2.0+2
 
 environment:
   sdk: ^3.13.7
@@ -9,10 +9,15 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
+  clerk_auth: 0.0.18-beta # pinned: beta, breaking changes between versions
   flutter_map: ^8.3.2
+  geolocator: ^14.1.2
   http: ^1.6.0
   latlong2: ^0.10.1
+  lucide_icons_flutter: ^4.0.1
+  shared_preferences: ^2.5.6
   url_launcher: ^6.3.3
+  vapi: ^0.1.0
 
 dev_dependencies:
   flutter_test:
@@ -21,3 +26,26 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+  # Ecurious's type system, as on the web (web/app/layout.tsx). All SIL OFL: assets/fonts/OFL-*.txt
+  fonts:
+    - family: Bebas Neue
+      fonts:
+        - asset: assets/fonts/BebasNeue-400.ttf
+    - family: Space Grotesk
+      fonts:
+        - asset: assets/fonts/SpaceGrotesk-400.ttf
+        - asset: assets/fonts/SpaceGrotesk-500.ttf
+          weight: 500
+        - asset: assets/fonts/SpaceGrotesk-600.ttf
+          weight: 600
+        - asset: assets/fonts/SpaceGrotesk-700.ttf
+          weight: 700
+    - family: JetBrains Mono
+      fonts:
+        - asset: assets/fonts/JetBrainsMono-400.ttf
+        - asset: assets/fonts/JetBrainsMono-500.ttf
+          weight: 500
+        - asset: assets/fonts/JetBrainsMono-600.ttf
+          weight: 600
+        - asset: assets/fonts/JetBrainsMono-700.ttf
+          weight: 700

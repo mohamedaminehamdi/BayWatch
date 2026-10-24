@@ -1,11 +1,19 @@
-import { fail } from '@/lib/reservation';
-import { body, direction, handle, requireUser, reservations, simulator } from '@/lib/server';
+import { fail } from '@/lib/errors';
+import { LEGACY_BAY } from '@/lib/legacy';
+import { assertSimulated, body, direction, handle, requireUser, resolveBay, schedule, simulator } from '@/lib/server';
 
-// Dev only: lets the demo panel fake camera events. Never set SIMULATOR=1 next to real hardware.
+// Demo only (SIMULATOR=1): { bayId, plate, direction } fakes what a camera sees. Refused (403) for bays with a real
+// lock. Without bayId (the old demo panel): Baywatch Bay 1.
 export const POST = (req: Request) =>
   handle(async () => {
     if (!simulator) fail(404, 'Not found');
     await requireUser();
     const input = await body(req);
-    return reservations.plateEvent(input.plate, direction(input.direction));
+    const bay = await resolveBay(typeof input.bayId === 'string' ? input.bayId : LEGACY_BAY);
+    assertSimulated(bay);
+    if (direction(input.direction) === 'out') {
+      await schedule.vacated(bay.id);
+      return { matched: false };
+    }
+    return schedule.plateEvent(bay.id, input.plate);
   });

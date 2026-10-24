@@ -40,8 +40,10 @@ export function sseParser(onMessage: (m: SseMessage) => void) {
 const TYPES: Record<string, HwEvent['type']> = {
   photo_captured: 'photo',
   car_presence: 'presence',
+  car_presence_changed: 'presence', // what the live server actually sends (seen 2026-10-24, 16:0x)
   vehicle_presence: 'presence',
   status_change: 'arm',
+  status_changed: 'arm', // what the live server actually sends (seen 2026-10-24, 16:0x)
   alarm: 'alarm',
   heartbeat: 'heartbeat',
 };
@@ -63,7 +65,7 @@ export function toEvent({ event, data }: SseMessage): HwEvent | null {
   if (!type || !lockId) return null;
   if (type === 'photo') return { type, lockId, plate: String(d.licensePlate ?? d.plate ?? '') };
   if (type === 'presence') {
-    const presence = PRESENCE[String(d.presence ?? d.carPresence)];
+    const presence = PRESENCE[String(d.presence ?? d.carPresence ?? d.carPresenceRaw)];
     return presence ? { type, lockId, presence } : null;
   }
   if (type === 'arm') {

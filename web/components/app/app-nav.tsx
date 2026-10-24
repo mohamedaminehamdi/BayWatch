@@ -7,7 +7,8 @@ import { usePathname } from 'next/navigation';
 import { DemoPanel } from '@/components/demo-panel';
 import { chipClass } from '@/components/ui/button';
 import { Logo } from '@/components/ui/logo';
-import { formatCountdown, useNow } from '../time';
+import { MicButton } from '@/components/voice/mic-button';
+import { formatTime, useNow } from '../time';
 import { useAppState } from './app-state';
 
 type Item = { href: string; label: string; icon: LucideIcon };
@@ -20,24 +21,31 @@ const ITEMS: Item[] = [
 const OPERATOR: Item = { href: '/operator', label: 'Operator', icon: Gauge };
 
 // While the driver has a live booking (or a bay held for them), it's one tap away from every screen
+// The next or active booking, one tap away from every screen. End times, never a ticking countdown,
+// which reads like a clock time next to "15:00–17:00".
+const sameDay = (a: number, b: number) => new Date(a).toDateString() === new Date(b).toDateString();
+const when = (at: number, now: number) => (sameDay(at, now) ? formatTime(at) : `${new Date(at).toLocaleDateString([], { weekday: 'short' })} ${formatTime(at)}`);
+
 function LivePill() {
   const { state } = useAppState();
   const now = useNow();
-  const r = state?.reservation;
-  let label: string | null = null;
-  let href = '/booking';
-  if (r?.mine && r.status === 'reserved') label = r.blockedSince ? 'Bay blocked · hold paused' : `Held for you · ${formatCountdown(r.expiresAt - now)}`;
-  else if (r?.mine && r.status === 'arrived') label = 'Checked in';
-  else if (r?.mine && r.status === 'charging') label = 'Charging';
-  else if (state?.priority?.mine) {
-    label = `Bay held for you to book · ${formatCountdown(state.priority.until - now)}`;
-    href = '/explore';
-  }
-  if (!label) return null;
-  const warn = !!r?.blockedSince;
+  const r = state?.viewer?.active ?? state?.viewer?.next ?? null;
+  if (!r || !now) return null;
+  const label = r.blockedSince
+    ? 'Bay occupied · see options'
+    : r.status === 'charging'
+      ? `Charging until ${formatTime(r.end)}`
+      : r.status === 'walkup'
+        ? `Walk-up until ${formatTime(r.end)}`
+        : r.status === 'arrived'
+          ? 'Checked in'
+          : r.status === 'live' && now >= r.start
+            ? `Held until ${formatTime(r.arriveBy)}`
+            : `Starts ${when(r.start, now)}`;
+  const warn = !!r.blockedSince;
   return (
     <Link
-      href={href}
+      href={`/booking/${r.id}`}
       className={`${chipClass} min-h-11 px-3.5 ring-1 ring-inset ${
         warn ? 'bg-warn-tint text-warn ring-warn/25 hover:bg-warn-tint/70' : 'bg-brand-tint text-brand-strong ring-brand/20 hover:bg-brand-soft'
       }`}
@@ -54,13 +62,13 @@ function LivePill() {
 export function AppNav({ operator }: { operator: boolean }) {
   const path = usePathname();
   const items = operator ? [...ITEMS, OPERATOR] : ITEMS;
-  const current = (href: string) => path === href || (href === '/bookings' && path === '/booking');
+  const current = (href: string) => path === href || (href === '/bookings' && path.startsWith('/booking'));
 
   return (
     <>
       <header className="sticky top-0 z-(--z-nav) border-b border-line bg-page/90 backdrop-blur-sm">
         <div className="mx-auto flex h-14 max-w-7xl items-center gap-6 px-4 sm:px-6 lg:h-16">
-          <Link href="/explore" aria-label="Ecurious Reserve, explore" className="rounded-lg">
+          <Link href="/explore" aria-label="Baywatch, explore" className="rounded-lg">
             <Logo />
           </Link>
           <nav aria-label="App" className="hidden h-full items-stretch gap-1 lg:flex">
@@ -81,6 +89,7 @@ export function AppNav({ operator }: { operator: boolean }) {
               <LivePill />
             </div>
             <DemoPanel />
+            <MicButton />
             <UserButton appearance={{ elements: { avatarBox: 'size-9' } }} />
           </div>
         </div>

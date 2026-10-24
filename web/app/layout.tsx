@@ -10,8 +10,8 @@ const sans = Space_Grotesk({ subsets: ["latin", "latin-ext"], variable: "--font-
 const mono = JetBrains_Mono({ subsets: ["latin", "latin-ext"], variable: "--font-jetbrains-mono" });
 
 export const metadata: Metadata = {
-  title: { default: "Ecurious Reserve: your charging spot, kept free", template: "%s · Ecurious Reserve" },
-  description: "Reserve a public EV charger before you set off. A guard keeps the bay free and the camera checks you in on arrival.",
+  title: { default: "Baywatch: your charging spot, kept free", template: "%s · Baywatch" },
+  description: "Book a public EV charger before you set off. A guard keeps the bay free and the camera checks you in on arrival.",
 };
 
 export const viewport: Viewport = {
@@ -27,8 +27,8 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
           afterSignOutUrl="/"
           // our own copy, so the screens don't depend on the app name set in the Clerk dashboard
           localization={{
-            signIn: { start: { title: "Sign in", subtitle: "Welcome back to Ecurious Reserve" } },
-            signUp: { start: { title: "Create your account", subtitle: "Reserve your first bay in a minute" } },
+            signIn: { start: { title: "Sign in", subtitle: "Welcome back to Baywatch" } },
+            signUp: { start: { title: "Create your account", subtitle: "Book your first bay in a minute" } },
           }}
           appearance={{
             cssLayerName: "clerk",

@@ -1,10 +1,12 @@
 import { clerkClient } from '@clerk/nextjs/server';
-import { normalizePlate } from './plates';
+import { cameraPlate, normalizePlate } from './plates';
 import { fail } from './reservation';
 
 // A driver's cars live in their Clerk account (privateMetadata: server-only, never sent to the browser by Clerk).
-// `plate` is normalized for matching camera reads; `display` keeps the driver's spacing ("M AB 1234").
-export type Vehicle = { id: string; plate: string; display: string; label: string; consentAt: number };
+// `plate` is normalized for matching camera reads; `display` keeps the driver's spacing ("M AB 1234"); `cameraPlate`
+// is what the bay camera's own allow-list gets, Han characters and all ("湘A613EN"). Cars added before it existed
+// have none: their plate stands in.
+export type Vehicle = { id: string; plate: string; display: string; label: string; consentAt: number; cameraPlate?: string };
 
 const MAX = 5;
 
@@ -34,10 +36,18 @@ export async function addVehicle(userId: string, input: Record<string, unknown>)
   if (label.length > 30) fail(400, 'Keep the nickname under 30 characters');
   if (input.consent !== true) fail(400, 'Agree to plate recognition to add this car');
   const vehicles = await listVehicles(userId);
+  const display = String(input.plate).toUpperCase().replace(/[^\p{Script=Han}A-Z0-9ÄÖÜ -]/gu, '').replace(/\s+/g, ' ').trim().slice(0, 14);
+  const camera = cameraPlate(input.plate);
+  const same = vehicles.find((v) => v.plate === plate);
+  if (same) {
+    if ((same.cameraPlate ?? same.plate) === camera) fail(409, 'This car is already in your account');
+    // the same car, added before its Han characters were kept ("A613EN" for 湘A613EN): they're added now
+    Object.assign(same, { display, cameraPlate: camera });
+    await save(userId, vehicles);
+    return same;
+  }
   if (vehicles.length >= MAX) fail(409, `You can add up to ${MAX} cars`);
-  if (vehicles.some((v) => v.plate === plate)) fail(409, 'This car is already in your account');
-  const display = String(input.plate).toUpperCase().replace(/[^A-Z0-9ÄÖÜ -]/g, '').replace(/\s+/g, ' ').trim().slice(0, 14);
-  const v: Vehicle = { id: crypto.randomUUID(), plate, display, label: label || 'My car', consentAt: Date.now() };
+  const v: Vehicle = { id: crypto.randomUUID(), plate, display, label: label || 'My car', consentAt: Date.now(), cameraPlate: camera };
   await save(userId, [...vehicles, v]);
   return v;
 }

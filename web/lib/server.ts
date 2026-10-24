@@ -1,74 +1,125 @@
 import { timingSafeEqual } from 'node:crypto';
-import { auth, currentUser } from '@clerk/nextjs/server';
-import { ARRIVAL_GRACE_MS, TYPES, type ReservationType } from './booking-rules';
+import { auth, clerkClient, currentUser } from '@clerk/nextjs/server';
+import { baywatchBays, geBay, geIdOf, type BayInfo } from './bays';
+import type { StateResponse, ViewerSummary, Wallet } from './booking-types';
 import * as ecurious from './ecurious';
+import { fail } from './errors';
+import { chargerById, chargersNear } from './goingelectric';
+import { legacyFacade, legacyState } from './legacy';
 import { emailBlockedBay, operatorEmails } from './notify';
 import { weekStats } from './operator';
-import { createReservations, fail, type Direction } from './reservation';
+import { settleBooking } from './payments';
+import { createSchedule, type Schedule } from './schedule';
 
 export const simulator = process.env.SIMULATOR === '1';
-export const bay = {
-  name: process.env.BAY_NAME ?? 'Ecurious test bay',
-  address: process.env.BAY_ADDRESS ?? 'Hackathon venue',
-  lat: Number(process.env.BAY_LAT ?? 52.52),
-  lng: Number(process.env.BAY_LNG ?? 13.405),
-  powerKw: Number(process.env.BAY_POWER_KW ?? 200),
+const holidays = (process.env.HOLIDAYS ?? '').split(',').map((d) => d.trim()).filter(Boolean); // YYYY-MM-DD, priced as busy
+
+// Driver credit lives in their Clerk privateMetadata (creditCents, firstFree). updateUserMetadata merges, so the
+// cars (vehicles.ts) and the Stripe customer id stay. A driver without the flag is new: the first booking is free.
+const wallets = {
+  async load(userId: string): Promise<Wallet> {
+    const m = (await (await clerkClient()).users.getUser(userId)).privateMetadata;
+    const credit = Number(m.creditCents);
+    return { creditCents: Number.isInteger(credit) && credit > 0 ? credit : 0, firstFree: m.firstFree !== false };
+  },
+  async save(userId: string, w: Wallet) {
+    await (await clerkClient()).users.updateUserMetadata(userId, { privateMetadata: { creditCents: w.creditCents, firstFree: w.firstFree } });
+  },
 };
 
-// fast (DC, sessions up to 2 h) or slow (AC, up to 4 h): from the charger's power unless BAY_TYPE says otherwise
-const typeEnv = process.env.BAY_TYPE;
-export const bayType: ReservationType = typeEnv === 'fast' || typeEnv === 'slow' ? typeEnv : bay.powerKw >= 50 ? 'fast' : 'slow';
+// Re-routing candidates: the other Baywatch bays and GoingElectric chargers within 3 km (cached by fetch)
+async function nearby(bay: BayInfo) {
+  const found = (await chargersNear(bay.lat, bay.lng, 3)) ?? [];
+  return [...schedule.realBays(), ...found.map(geBay)];
+}
 
-// HOLD_MINUTES overrides the 15-min arrival grace, for short demo holds (fractions allowed: 0.5 = 30 s)
-const holdOverrideMs = process.env.HOLD_MINUTES ? Number(process.env.HOLD_MINUTES) * 60_000 : undefined;
-export const holdMinutes = (holdOverrideMs ?? ARRIVAL_GRACE_MS) / 60_000;
+// Bump when the engine's shape changes, so a hot-reloading dev server starts a fresh one instead of keeping
+// an old instance that lacks the new methods
+const STORE = 'schedule_v1';
+const g = globalThis as typeof globalThis & { [STORE]?: Schedule };
 
-// Session lengths offered, in minutes, all within the type's maximum. The demo adds a 16-min session,
-// so the reminder 15 min before the end shows up a minute after checking in.
-export const sessionPresets = [...(bayType === 'fast' ? [30, 60, 90, 120] : [60, 120, 180, 240]), ...(simulator ? [16] : [])].sort((a, b) => a - b);
-
-// "Site demand" in the demo panel: the share of the site in use, which sets the price tier
-export const DEMAND_LEVELS = { quiet: 0.15, normal: 0.5, busy: 0.8, full: 0.95 };
-
-type Reservations = ReturnType<typeof createReservations>;
-// Bump when the store's shape changes, so a hot-reloading dev server starts a fresh store instead of
-// keeping an old instance that lacks the new methods
-const STORE = 'reservations_v2';
-const g = globalThis as typeof globalThis & { [STORE]?: Reservations };
-
-// One instance per process, shared by all route handlers and kept across dev reloads.
+// One engine per process, shared by all route handlers and kept across dev reloads.
 // ponytail: needs one long-running `next start` process; serverless instances would each get their own state.
-export const reservations: Reservations = (g[STORE] ??= (() => {
-  const r = createReservations({
-    hw: ecurious,
-    type: bayType,
-    holdMs: holdOverrideMs,
-    bay,
+export const schedule: Schedule = (g[STORE] ??= (() => {
+  const s = createSchedule({
+    bays: baywatchBays(),
+    hw: { raise: ecurious.raise, lower: ecurious.lower, setPlates: ecurious.setPlates, status: ecurious.status },
+    wallets,
+    holidays,
     // email in the background; the alert shows the delivery status on the dashboard
-    onAlert: (alert) => void emailBlockedBay(alert.since, bay).then((s) => (alert.emailStatus = s)),
+    onAlert: (alert, bay) => void emailBlockedBay(alert.since, bay).then((st) => (alert.emailStatus = st)),
+    // card payments (lib/payments.ts): a booking with a hold is settled for its receipt; demo bookings are skipped
+    onEnd: (booking) => void settleBooking(booking),
+    nearby,
   });
-  setInterval(r.expire, 5_000);
-  return r;
+  setInterval(() => void s.tick(), 5_000);
+  return s;
 })());
 
+// Live mode: the configured locks are checked against the team's (GET /locks) and any other one is dropped, so
+// it's never called. true once checked (or in mock mode). The bridge retries until it succeeds.
+export async function validateLocks() {
+  if (!ecurious.live()) return true;
+  try {
+    schedule.dropLocks(await ecurious.teamLocks());
+    return true;
+  } catch (e) {
+    console.warn(`[ecurious] the team's locks could not be read: ${(e as Error).message}`);
+    return false;
+  }
+}
+void validateLocks();
+
+// A bay by id: a Baywatch bay, or a GoingElectric charger (looked up once, then remembered)
+export async function resolveBay(id: string) {
+  const known = schedule.bay(id);
+  if (known) return known;
+  const geId = geIdOf(id);
+  const charger = geId === null ? null : await chargerById(geId);
+  return charger ? schedule.knowBay(geBay(charger)) : fail(404, 'Unknown bay');
+}
+
+// Demo events (the demo panel) are refused for bays behind a real lock: they listen only to the real camera and
+// sensor, so a faked plate can never move a real arm. With the hardware mocked there's no real arm to protect.
+export function assertSimulated(bay: BayInfo) {
+  if (bay.lockId && ecurious.live()) fail(403, `${bay.name} has a real lock: it only listens to its own camera and car sensor`);
+}
+
+// The hardware behind a bay, for the screens. A bay without a lock reports the guard it simulates.
+export async function hardwareStatus(bayId: string = 'bw-1') {
+  const lockId = schedule.bay(bayId)?.lockId;
+  return lockId ? { online: true, ...(await ecurious.status(lockId)) } : { online: true, state: 'unknown' as const, mock: true };
+}
+
+async function viewerSummary(userId: string): Promise<ViewerSummary> {
+  const { active, upcoming, creditCents, firstFree } = await schedule.bookingsOf(userId);
+  return { active, next: upcoming[0] ?? null, creditCents, firstFree };
+}
+
+// GET /api/state: the v2 summary for the app shell, plus the fields the old screens read (legacy.ts) until they go
 export async function appState(viewerId: string | null) {
-  return {
-    bay,
-    session: { type: bayType, label: TYPES[bayType].label, maxMinutes: TYPES[bayType].maxMs / 60_000, presets: sessionPresets },
-    holdMinutes,
+  const v2: StateResponse = {
     simulator,
-    hardware: await ecurious.status(),
-    ...reservations.state(viewerId),
+    demand: schedule.demand(),
+    viewer: viewerId ? await viewerSummary(viewerId) : null,
+    realBays: schedule.realBays().map(schedule.bayView),
   };
+  return { ...v2, ...(await legacyState(schedule, viewerId, { simulator, hardware: await hardwareStatus() })) };
 }
 export type AppState = Awaited<ReturnType<typeof appState>>;
 
-// The operator dashboard: live bay, alerts (plates until resolved), event log and the last 7 days
+// The operator dashboard: every Baywatch bay with its hardware, the alerts (plates until resolved), the event
+// log and the last 7 days
 export async function operatorData() {
-  const { records, alerts } = reservations.analytics();
-  return { bay, simulator, hardware: await ecurious.status(), ...reservations.operatorState(), stats: weekStats(records, alerts, Date.now()) };
+  const { records, alerts } = schedule.analytics();
+  const bays = await Promise.all(schedule.realBays().map(async (b) => ({ ...schedule.operatorBay(b.id), hardware: await hardwareStatus(b.id) })));
+  return { simulator, bays, alerts: schedule.alerts(), log: schedule.log(), stats: weekStats(records, alerts, Date.now()) };
 }
 export type OperatorData = Awaited<ReturnType<typeof operatorData>>;
+
+// The old screens and the modules still on v1 names (deprecated; legacy.ts)
+const legacy = legacyFacade(schedule, holidays);
+export const { bay, holdMinutes, reservations } = legacy;
 
 // Signed-in Clerk user, or 401. Session cookies (web) and Bearer session tokens (Flutter, later) both work.
 export async function requireUser() {
@@ -91,7 +142,7 @@ export async function requireOperator() {
 }
 
 // Camera events: 'in' (car entered the bay, the default) or 'out' (car left)
-export const direction = (v: unknown): Direction =>
+export const direction = (v: unknown): 'in' | 'out' =>
   v === undefined || v === 'in' ? 'in' : v === 'out' ? 'out' : fail(400, 'direction must be "in" or "out"');
 
 // Fails closed: no secret configured means nobody can send plate events (a matching plate opens the bay)

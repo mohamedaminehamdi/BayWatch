@@ -1,11 +1,11 @@
 {
-    "name": "ecurious_reserve",
-    "short_name": "ecurious_reserve",
+    "name": "Baywatch",
+    "short_name": "Baywatch",
     "start_url": ".",
     "display": "standalone",
-    "background_color": "#0175C2",
-    "theme_color": "#0175C2",
-    "description": "A new Flutter project.",
+    "background_color": "#F5F4F1",
+    "theme_color": "#F5F4F1",
+    "description": "Book a public EV charger, and the bay is kept free until you arrive.",
     "orientation": "portrait-primary",
     "prefer_related_applications": false,
     "icons": [
