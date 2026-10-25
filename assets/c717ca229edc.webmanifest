@@ -1,0 +1,1 @@
+{"name":"Baywatch","short_name":"Baywatch","description":"Find public EV chargers and book a bay through Baywatch.","start_url":"/explore","display":"standalone","background_color":"#f5f4f1","theme_color":"#f5f4f1","icons":[{"src":"/icon.svg","sizes":"any","type":"image/svg+xml"},{"src":"/icon-512.png","sizes":"512x512","type":"image/png","purpose":"maskable"}]}
