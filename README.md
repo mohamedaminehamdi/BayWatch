@@ -15,6 +15,8 @@ Operators get blocked-bay alerts and a dashboard, and other charging apps can bo
 
 
 <p align="center">
+  <a href="https://mohamedaminehamdi.github.io/BayWatch/" style="color: #A78BFA;"><strong>Landing page</strong></a>
+  &nbsp;·&nbsp;
   <a href="baywatch_demo_90s.mp4" style="color: #A78BFA;"><strong>▶ Watch the 90-second demo</strong></a>
   &nbsp;·&nbsp;
   <a href="https://app.notion.com/p/BayWatch-4032e6d9e3bb8033b730de17ef7f7b33?source=copy_link" style="color: #A78BFA;">Project board</a>
